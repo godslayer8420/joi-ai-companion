@@ -15498,46 +15498,70 @@ HTML_TEMPLATE = """
 
     <!-- Telescope Modal -->
     <div class="modal" id="telescopeModal" style="z-index:10005;">
-        <div class="modal-content" style="max-width:720px;background:#080c18;color:#c8d8f0;border:1px solid #2040a0;">
+    <div class="modal" id="telescopeModal" style="z-index:10005;">
+        <div class="modal-content" style="max-width:1060px;background:#080c18;color:#c8d8f0;border:1px solid #2040a0;">
             <div class="modal-header" style="background:#0a1030;border-bottom:1px solid #2040a0;">
-                <span>ðŸ”­ Aurion's Telescope</span>
-                <button class="close-btn" onclick="closeModal('telescopeModal')">âœ•</button>
+                <span>&#128269; Aurion's Telescope</span>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <button onclick="openSkyWindow()" style="background:linear-gradient(135deg,#1a4080,#0a2050);border:1px solid #3060c0;color:#90d0ff;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:0.85em;">&#127759; Full Sky Window</button>
+                    <button onclick="openStellariumWindow()" style="background:linear-gradient(135deg,#1a3050,#0a1a30);border:1px solid #2050a0;color:#80c0ff;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:0.85em;">&#10024; Stellarium</button>
+                    <button class="close-btn" onclick="closeModal('telescopeModal')">&#10005;</button>
+                </div>
             </div>
-            <div style="padding:16px;display:flex;gap:16px;flex-wrap:wrap;">
-                <!-- Circular aperture view -->
+            <!-- Target quick-aim row -->
+            <div style="padding:10px 16px 6px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid #1a2a50;">
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('moon','Moon','natural satellite')">&#127765; Moon</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('Jupiter','Jupiter','planet')">&#129738; Jupiter</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('Saturn','Saturn','planet')">&#128171; Saturn</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('Mars','Mars','planet')">&#128308; Mars</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('M31','Andromeda Galaxy','galaxy')">&#127756; M31</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('M42','Orion Nebula','nebula')">&#10024; M42</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('M13','Hercules Cluster','cluster')">&#11088; M13</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('M57','Ring Nebula','nebula')">&#128144; M57</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('M1','Crab Nebula','nebula')">&#129425; M1</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('B33','Horsehead Nebula','nebula')">&#9885; Horsehead</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('M33','Triangulum Galaxy','galaxy')">&#127756; M33</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('M45','Pleiades','cluster')">&#127770; Pleiades</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('Sirius','Sirius','star')">&#127775; Sirius</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('M104','Sombrero Galaxy','galaxy')">&#127760; M104</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('NGC 6992','Eastern Veil Nebula','nebula')">&#128165; Veil</button>
+                <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('Polaris','Polaris','star')">&#129517; Polaris</button>
+            </div>
+            <!-- Main view area -->
+            <div style="padding:14px 16px;display:flex;gap:16px;flex-wrap:wrap;">
+                <!-- Left: aperture canvas + Aurion narration -->
                 <div style="flex:0 0 300px;">
                     <canvas id="telescopeCanvas" width="300" height="300" style="border-radius:50%;border:3px solid #304080;background:#02040e;display:block;margin:0 auto;"></canvas>
                     <div style="text-align:center;margin-top:8px;font-size:0.8em;color:#7090c0;" id="telescopeTargetLabel">No target selected</div>
                     <div style="text-align:center;margin-top:4px;">
-                        <label style="font-size:0.78em;color:#a0b8d0;">Zoom: <span id="telescopeZoomVal">100</span>Ã—</label><br>
+                        <label style="font-size:0.78em;color:#a0b8d0;">Zoom: <span id="telescopeZoomVal">100</span>&#215;</label><br>
                         <input type="range" min="10" max="600" value="100" id="telescopeZoom" style="width:200px;" oninput="document.getElementById('telescopeZoomVal').textContent=this.value;renderTelescopeField();">
                     </div>
-                </div>
-                <!-- Target list + description -->
-                <div style="flex:1;min-width:260px;">
-                    <div style="font-size:0.82em;color:#90a8c8;margin-bottom:6px;">Aim at a target:</div>
-                    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
-                        <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('moon','Moon','natural satellite')">ðŸŒ• Moon</button>
-                        <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('jupiter','Jupiter','planet')">ðŸª Jupiter</button>
-                        <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('saturn','Saturn','planet')">ðŸ’« Saturn</button>
-                        <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('mars','Mars','planet')">ðŸ”´ Mars</button>
-                        <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('Andromeda Galaxy','Andromeda Galaxy','galaxy')">ðŸŒŒ M31</button>
-                        <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('Orion Nebula','Orion Nebula','nebula')">âœ¨ M42</button>
-                        <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('Hercules Cluster','Hercules Cluster','cluster')">â­ M13</button>
-                        <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('Ring Nebula','Ring Nebula','nebula')">ðŸ’ M57</button>
-                        <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('Sirius','Sirius','star')">ðŸŒŸ Sirius</button>
-                        <button class="btn-sm" style="background:#0a2040;color:#70b8ff;" onclick="telescopeAimAt('Polaris','Polaris','star')">ðŸ§­ Polaris</button>
-                    </div>
-                    <div id="telescopeDesc" style="font-size:0.82em;color:#b0c8e8;background:#060c20;border:1px solid #1a3060;border-radius:8px;padding:10px;min-height:80px;line-height:1.55;">
-                        Select a target to observeâ€¦
-                    </div>
-                    <button class="btn-sm" style="margin-top:8px;background:#102050;color:#90d0ff;width:100%;" onclick="telescopeDescribeNow()">âœ¨ Ask Aurion to describe what she sees</button>
+                    <div id="telescopeDesc" style="margin-top:10px;font-size:0.82em;color:#b0c8e8;background:#060c20;border:1px solid #1a3060;border-radius:8px;padding:10px;min-height:60px;line-height:1.55;">Select a target&#8230;</div>
+                    <button class="btn-sm" style="margin-top:8px;background:#102050;color:#90d0ff;width:100%;" onclick="telescopeDescribeNow()">&#10024; Ask Aurion what she sees</button>
                     <div id="telescopeNarrative" style="margin-top:8px;font-size:0.8em;color:#d0e8ff;background:#040a18;border:1px solid #0a2040;border-radius:8px;padding:10px;min-height:60px;display:none;font-style:italic;line-height:1.6;"></div>
                 </div>
+                <!-- Right: Aladin Lite live sky survey -->
+                <div style="flex:1;min-width:300px;display:flex;flex-direction:column;gap:8px;">
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                        <span style="font-size:0.8em;color:#6090b0;">&#127759; Live Sky Survey</span>
+                        <select id="aladinSurveySelect" style="font-size:0.78em;background:#0a1830;color:#90c0e8;border:1px solid #2040a0;padding:2px 6px;border-radius:4px;" onchange="switchAladinSurvey(this.value)">
+                            <option value="CDS/P/DSS2/color">DSS2 Color (optical)</option>
+                            <option value="CDS/P/2MASS/color">2MASS Infrared</option>
+                            <option value="CDS/P/SDSS9/color">SDSS Deep Optical</option>
+                            <option value="CDS/P/PanSTARRS/DR1/color-z-zg-g">PanSTARRS Color</option>
+                            <option value="CDS/P/WISE/W3">WISE Infrared</option>
+                            <option value="CDS/P/ESA/Herschel/PACS/160">Herschel Far-IR</option>
+                        </select>
+                        <span style="font-size:0.72em;color:#304060;">drag to pan &bull; scroll to zoom</span>
+                    </div>
+                    <div id="aladin-telescope-div" style="width:100%;height:340px;border-radius:8px;border:2px solid #1a3060;overflow:hidden;background:#020408;"></div>
+                    <div id="aladinStatus" style="font-size:0.75em;color:#406080;text-align:center;">Loading real sky imagery&#8230;</div>
+                </div>
             </div>
-            <!-- Sky object browser -->
-            <div style="padding:0 16px 14px;">
-                <div style="font-size:0.78em;color:#6080a0;margin-bottom:6px;">Moon Phase & Sky Objects</div>
+            <!-- Moon + planet info strip -->
+            <div style="padding:6px 16px 14px;border-top:1px solid #1a2a50;">
+                <div style="font-size:0.78em;color:#6080a0;margin:8px 0 6px;">&#127769; Moon &amp; Visible Objects</div>
                 <div id="telescopeMoonInfo" style="font-size:0.85em;color:#d0e0f8;background:#060c20;border-radius:6px;padding:8px;margin-bottom:8px;"></div>
                 <div id="telescopePlanetsInfo" style="font-size:0.8em;color:#c0d4f0;"></div>
             </div>
@@ -33710,6 +33734,82 @@ HTML_TEMPLATE = """
                 narr.textContent=d.success?(d.narrative||d.description):'(Could not get description.)';
             }catch(e){narr.textContent='(Error contacting server.)';}
         }
+        // ── Aladin Lite real-sky integration ────────────────────────────
+        window._aladin = null;
+        function _initAladin() {
+            if (window._aladin) return Promise.resolve(window._aladin);
+            return new Promise(function(resolve) {
+                if (document.getElementById('aladin-lite-script')) {
+                    const wait = setInterval(function() {
+                        if (window.A && window.A.init) {
+                            clearInterval(wait);
+                            if (!window._aladin) {
+                                window.A.init.then(function() {
+                                    window._aladin = window.A.aladin('#aladin-telescope-div', {
+                                        survey: 'CDS/P/DSS2/color',
+                                        fov: 2.0, cooFrame: 'ICRSd',
+                                        showReticle: true, showZoomControl: false,
+                                        showFullscreenControl: false, showLayersControl: false,
+                                        target: 'M42'
+                                    });
+                                    document.getElementById('aladinStatus').textContent = 'Real sky loaded. Drag to explore.';
+                                    resolve(window._aladin);
+                                });
+                            } else resolve(window._aladin);
+                        }
+                    }, 200);
+                } else {
+                    const s = document.createElement('script');
+                    s.id = 'aladin-lite-script';
+                    s.src = 'https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.js';
+                    s.charset = 'utf-8';
+                    document.head.appendChild(s);
+                    s.onload = function() {
+                        window.A.init.then(function() {
+                            window._aladin = window.A.aladin('#aladin-telescope-div', {
+                                survey: 'CDS/P/DSS2/color',
+                                fov: 2.0, cooFrame: 'ICRSd',
+                                showReticle: true, showZoomControl: false,
+                                showFullscreenControl: false, showLayersControl: false,
+                                target: 'M42'
+                            });
+                            document.getElementById('aladinStatus').textContent = 'Real sky loaded. Drag to explore.';
+                            resolve(window._aladin);
+                        });
+                    };
+                    s.onerror = function() {
+                        document.getElementById('aladinStatus').textContent = 'Sky survey unavailable offline.';
+                        resolve(null);
+                    };
+                }
+            });
+        }
+        function switchAladinSurvey(survey) {
+            if (window._aladin) window._aladin.setImageSurvey(survey);
+        }
+        function openSkyWindow() {
+            const target = _telescopeTarget ? _telescopeTarget.id : 'M42';
+            const survey = document.getElementById('aladinSurveySelect') ? document.getElementById('aladinSurveySelect').value : 'CDS/P/DSS2/color';
+            const url = 'https://aladin.cds.unistra.fr/AladinLite/?target=' + encodeURIComponent(target) + '&fov=2&survey=' + encodeURIComponent(survey);
+            window.open(url, '_blank', 'width=1200,height=800,toolbar=0,menubar=0');
+        }
+        function openStellariumWindow() {
+            window.open('https://stellarium-web.org/', '_blank', 'width=1200,height=800,toolbar=0,menubar=0');
+        }
+        // Patch initTelescope to also load Aladin
+        const _origInitTelescope = initTelescope;
+        initTelescope = function() { _origInitTelescope(); _initAladin(); };
+        // Patch telescopeAimAt to also point Aladin
+        const _origTeleAimAt = telescopeAimAt;
+        telescopeAimAt = function(id, name, type) {
+            _origTeleAimAt(id, name, type);
+            _initAladin().then(function(al) {
+                if (!al) return;
+                try { al.gotoObject(id); } catch(e) { al.gotoRaDec(0,0); }
+                document.getElementById('aladinStatus').textContent = 'Viewing: ' + name;
+            });
+        };
+        // ── END Aladin Lite ───────────────────────────────────────────────
         // ── END Night Sky + Telescope Engine ────────────────────────────
         // â”€â”€ END Weather Particle Engine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     </script>
