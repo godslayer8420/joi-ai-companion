@@ -969,6 +969,8 @@ def _resolve_pitch_scalar(text, settings):
     """Resolve effective pitch scalar from user controls + adaptive mode."""
     base_pitch = float(settings.get("pitch", 1.0))
     pitch_mode = str(settings.get("pitch_mode", "normal")).lower()
+    performance_mode = str(settings.get("performance_mode", "speaking")).lower()
+    singing_style = str(settings.get("singing_style", "lyrical")).lower()
     mode_bias = 0.0
     if pitch_mode == "high":
         mode_bias = 0.18
@@ -981,8 +983,50 @@ def _resolve_pitch_scalar(text, settings):
     pitch_max = float(settings.get("adaptive_pitch_max", 1.45))
     if pitch_min > pitch_max:
         pitch_min, pitch_max = pitch_max, pitch_min
+    if performance_mode == "singing":
+        mode_bias += 0.07
+        if singing_style == "soft":
+            mode_bias -= 0.02
+        elif singing_style == "belt":
+            mode_bias += 0.04
+        elif singing_style == "airy":
+            mode_bias += 0.01
+        drift = max(0.0, min(0.3, float(settings.get("pitch_drift", 0.08) or 0.08)))
+        responsiveness = max(0.0, min(100.0, float(settings.get("pitch_responsiveness", 72) or 72))) / 100.0
+        adaptive_shift += drift * 0.55 + responsiveness * 0.08
     raw_pitch = base_pitch + mode_bias + adaptive_shift
     return max(pitch_min, min(pitch_max, raw_pitch))
+
+
+def _build_vocal_runtime_profile(text, settings):
+    performance_mode = str(settings.get("performance_mode", "speaking") or "speaking").lower()
+    singing_style = str(settings.get("singing_style", "lyrical") or "lyrical").lower()
+    speech_style = str(settings.get("speech_style", "articulate") or "articulate").lower()
+    effective_pitch = _resolve_pitch_scalar(text, settings)
+    breathiness = max(0.0, min(1.0, float(settings.get("breathiness", 0.18) or 0.18)))
+    responsiveness = max(0.0, min(100.0, float(settings.get("pitch_responsiveness", 72) or 72)))
+    vibrato_amount = max(0.0, min(1.0, float(settings.get("vibrato_amount", 0.12) or 0.12)))
+    vibrato_rate_hz = max(0.0, min(12.0, float(settings.get("vibrato_rate_hz", 5.4) or 5.4)))
+    nonverbal = max(0.0, min(1.0, float(settings.get("nonverbal_expressiveness", 0.34) or 0.34)))
+    pitch_drift = max(0.0, min(0.3, float(settings.get("pitch_drift", 0.08) or 0.08)))
+
+    expression_words = str(text or "")
+    punctuation_energy = min(1.0, (expression_words.count("!") * 0.18) + (expression_words.count("?") * 0.08))
+    live_expression = max(0.0, min(1.0, punctuation_energy + responsiveness / 140.0 + (0.12 if performance_mode == "singing" else 0.0)))
+
+    return {
+        "performance_mode": performance_mode,
+        "singing_style": singing_style,
+        "speech_style": speech_style,
+        "effective_pitch": round(effective_pitch, 4),
+        "pitch_drift": round(pitch_drift, 4),
+        "pitch_responsiveness": round(responsiveness, 1),
+        "vibrato_amount": round(vibrato_amount, 4),
+        "vibrato_rate_hz": round(vibrato_rate_hz, 4),
+        "breathiness": round(breathiness, 4),
+        "nonverbal_expressiveness": round(nonverbal, 4),
+        "live_expression": round(live_expression, 4),
+    }
 
 def tts_worker():
     """Background worker that processes TTS requests from queue"""
@@ -1005,7 +1049,8 @@ def tts_worker():
             try:
                 print(f"[TTS Worker] Processing: '{text[:50]}...'", flush=True)
                 voices = worker_engine.getProperty('voices')
-                 
+                vocal_profile = _build_vocal_runtime_profile(text, settings)
+                  
                 voice_index = settings.get("voice_index", 1)
                 if voices and 0 <= voice_index < len(voices):
                     worker_engine.setProperty('voice', voices[voice_index].id)
@@ -1016,24 +1061,29 @@ def tts_worker():
                 
                 base_rate = int(settings.get("rate", 135))
                 style_mode = str(settings.get("speech_style", "casual")).lower()
-                effective_pitch = _resolve_pitch_scalar(text, settings)
+                performance_mode = str(settings.get("performance_mode", "speaking")).lower()
+                effective_pitch = float(vocal_profile.get("effective_pitch", _resolve_pitch_scalar(text, settings)))
                 rate_adjust = 0
                 rate_adjust += int(round((effective_pitch - 1.0) * 55))
                 if style_mode == "articulate":
                     rate_adjust -= 10
                 elif style_mode == "casual":
                     rate_adjust -= 4
+                if performance_mode == "singing":
+                    rate_adjust -= 14
                 punctuation_bias = min(12, (str(text).count(",") * 2) + (str(text).count(";") * 2) + (str(text).count(".") * 1))
                 rate_adjust -= punctuation_bias
                 applied_rate = max(95, min(220, base_rate + rate_adjust))
                 worker_engine.setProperty('rate', int(applied_rate))
-                print(f"[TTS Worker] Rate: {applied_rate} (base={base_rate}, effective_pitch={round(effective_pitch, 2)}, style={style_mode})", flush=True)
+                print(f"[TTS Worker] Rate: {applied_rate} (base={base_rate}, effective_pitch={round(effective_pitch, 2)}, style={style_mode}, mode={performance_mode})", flush=True)
                 
                 volume = settings.get("volume", 100) / 100.0
                 worker_engine.setProperty('volume', min(1.0, max(0.0, volume)))
                 print(f"[TTS Worker] Volume: {volume}", flush=True)
                 
                 tts_text = adapt_tts_text(text, style_mode)
+                if performance_mode == "singing":
+                    tts_text = f"{tts_text} ♪"
                 print(f"[TTS Worker] Calling say()...", flush=True)
                 worker_engine.say(tts_text)
                 print(f"[TTS Worker] Calling runAndWait()...", flush=True)
@@ -1087,7 +1137,15 @@ VOICE_SETTINGS_DEFAULTS = {
     "adaptive_pitch": "enabled",
     "adaptive_strength": 35,
     "adaptive_pitch_min": 0.82,
-    "adaptive_pitch_max": 1.15
+    "adaptive_pitch_max": 1.15,
+    "performance_mode": "speaking",
+    "singing_style": "lyrical",
+    "pitch_drift": 0.08,
+    "pitch_responsiveness": 72,
+    "vibrato_amount": 0.12,
+    "vibrato_rate_hz": 5.4,
+    "breathiness": 0.18,
+    "nonverbal_expressiveness": 0.34
 }
 
 SYNC_SETTINGS_DEFAULTS = {
@@ -1308,6 +1366,33 @@ HOME_LAYOUT = {
     }
 }
 
+HOME_CONNECTIONS = [
+    {"from": "foyer", "to": "living_room", "kind": "open_entry", "label": "front entry to living room"},
+    {"from": "foyer", "to": "kitchen", "kind": "hall_opening", "label": "entry passage to kitchen"},
+    {"from": "living_room", "to": "dining_room", "kind": "open_plan", "label": "living room to dining room"},
+    {"from": "kitchen", "to": "dining_room", "kind": "open_plan", "label": "kitchen to dining room"},
+    {"from": "living_room", "to": "hallway", "kind": "staircase_up", "label": "stairs from lower living area to upper hallway"},
+    {"from": "hallway", "to": "master_bedroom", "kind": "doorway", "label": "upper hall to master bedroom"},
+    {"from": "hallway", "to": "bedroom_2", "kind": "doorway", "label": "upper hall to bedroom 2"},
+    {"from": "hallway", "to": "bedroom_3", "kind": "doorway", "label": "upper hall to bedroom 3"},
+    {"from": "hallway", "to": "bathroom_2", "kind": "doorway", "label": "upper hall to upper bathroom"},
+    {"from": "foyer", "to": "utility_room", "kind": "service_door", "label": "entry access to utility room"},
+    {"from": "dining_room", "to": "back_patio", "kind": "exterior_threshold", "label": "rear dining view and patio access"},
+    {"from": "foyer", "to": "front_porch", "kind": "front_door", "label": "foyer to front porch"},
+    {"from": "kitchen", "to": "back_yard", "kind": "service_access", "label": "kitchen side access toward back yard and garden"},
+]
+
+HOME_YARD_ZONES = [
+    {"id": "front_porch", "name": "Front Porch", "kind": "structure", "adjacent_room": "foyer", "desc": "Covered front entry overlooking Starbright Blvd."},
+    {"id": "front_yard", "name": "Front Yard", "kind": "landscape", "adjacent_room": "living_room", "desc": "Primary curbside lawn and garden facing the neighborhood."},
+    {"id": "driveway", "name": "Driveway", "kind": "hardscape", "adjacent_room": "foyer", "desc": "Vehicle approach and parking zone leading to the front entry."},
+    {"id": "side_yard", "name": "Side Yard", "kind": "landscape", "adjacent_room": "living_room", "desc": "Narrow side lawn with sunset exposure and utility access."},
+    {"id": "back_patio", "name": "Back Patio", "kind": "hardscape", "adjacent_room": "dining_room", "desc": "Outdoor dining threshold and transition space to the yard."},
+    {"id": "back_yard", "name": "Back Yard", "kind": "landscape", "adjacent_room": "kitchen", "desc": "Main rear yard with tree line, weather exposure, and free-roam space."},
+    {"id": "garden_zone", "name": "Garden Zone", "kind": "cultivation", "adjacent_room": "kitchen", "desc": "Food-growing and permaculture zone under Aurion's care."},
+    {"id": "utility_side", "name": "Utility Side", "kind": "service", "adjacent_room": "utility_room", "desc": "Mechanical and service access strip near the foundation."},
+]
+
 # All window IDs flattened for quick lookup
 def _get_all_windows():
     wins = {}
@@ -1316,6 +1401,440 @@ def _get_all_windows():
             for w in room.get("windows", []):
                 wins[w["id"]] = {"room": rid, **w}
     return wins
+
+
+def _get_home_room_index():
+    rooms = {}
+    for level_id, level in HOME_LAYOUT.get("levels", {}).items():
+        for room_id, room in dict(level.get("rooms") or {}).items():
+            rooms[room_id] = {
+                "id": room_id,
+                "level": level_id,
+                "level_name": str(level.get("name", level_id) or level_id),
+                **dict(room or {}),
+            }
+    return rooms
+
+
+def _get_home_zone_index():
+    zones = {}
+    for zone in list(HOME_YARD_ZONES or []):
+        item = dict(zone or {})
+        zone_id = str(item.get("id", "") or "").strip()
+        if zone_id:
+            zones[zone_id] = item
+    return zones
+
+
+def _navigation_lookup_key(value):
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def _resolve_navigation_target_id(target_id, rooms=None, zones=None, places=None, prefer=None):
+    rooms = dict(rooms or _get_home_room_index())
+    zones = dict(zones or _get_home_zone_index())
+    world_builder = _resolve_world_builder_state()
+    places = dict(places or {str((row or {}).get("id", "") or "").strip(): dict(row or {}) for row in list(world_builder.get("places") or [])})
+    target_id = str(target_id or "").strip()
+    if not target_id:
+        return ""
+    if prefer == "place" and target_id in places:
+        return target_id
+    if prefer == "zone" and target_id in zones:
+        return target_id
+    if prefer == "room" and target_id in rooms:
+        return target_id
+
+    lookup = _navigation_lookup_key(target_id)
+    ordered = []
+    if prefer == "place":
+        ordered = [places, zones, rooms]
+    elif prefer == "zone":
+        ordered = [zones, places, rooms]
+    else:
+        ordered = [rooms, zones, places]
+    for bucket in ordered:
+        for key in bucket.keys():
+            if _navigation_lookup_key(key) == lookup:
+                return key
+    if target_id in rooms or target_id in zones or target_id in places:
+        return target_id
+    return target_id
+
+
+def _build_navigation_graph():
+    graph = {}
+    rooms = _get_home_room_index()
+    zones = _get_home_zone_index()
+    world_builder = _resolve_world_builder_state()
+    places = {str((row or {}).get("id", "") or "").strip(): dict(row or {}) for row in list(world_builder.get("places") or [])}
+
+    def connect(src, dst):
+        src_id = _resolve_navigation_target_id(src, rooms=rooms, zones=zones, places=places)
+        dst_id = _resolve_navigation_target_id(dst, rooms=rooms, zones=zones, places=places)
+        if not src_id or not dst_id:
+            return
+        graph.setdefault(src_id, set()).add(dst_id)
+        graph.setdefault(dst_id, set()).add(src_id)
+
+    for link in list(HOME_CONNECTIONS or []):
+        connect(link.get("from"), link.get("to"))
+    for zone in list(HOME_YARD_ZONES or []):
+        zone_id = str((zone or {}).get("id", "") or "").strip()
+        adjacent = str((zone or {}).get("adjacent_room", "") or "").strip()
+        if zone_id and adjacent:
+            connect(zone_id, adjacent)
+
+    for place in list(world_builder.get("places") or []):
+        place_id = str((place or {}).get("id", "") or "").strip()
+        for linked in list((place or {}).get("links") or []):
+            connect(place_id, linked)
+        anchor_room = str((place or {}).get("anchor_room", "") or "").strip()
+        if place_id and anchor_room:
+            connect(place_id, anchor_room)
+    return {key: sorted(values) for key, values in graph.items()}
+
+
+def _build_navigation_sight(location_id):
+    home = dict(app_state.get("home_environment") or _default_home_state())
+    weather = dict(home.get("weather") or {})
+    solar = dict(home.get("solar") or {})
+    rooms = _get_home_room_index()
+    zones = _get_home_zone_index()
+    world_builder = _resolve_world_builder_state()
+    places = {str((row or {}).get("id", "") or "").strip(): dict(row or {}) for row in list(world_builder.get("places") or [])}
+    location_id = _resolve_navigation_target_id(location_id, rooms=rooms, zones=zones, places=places)
+
+    visible_targets = _build_navigation_graph().get(location_id, [])
+    sight_lines = []
+    windows = []
+    label = location_id or "unknown"
+    location_kind = "unknown"
+
+    if location_id in rooms:
+        room = dict(rooms.get(location_id) or {})
+        label = str(room.get("name", location_id) or location_id)
+        location_kind = "room"
+        windows = [dict(w or {}) for w in list(room.get("windows") or [])]
+        view_bits = [str((w or {}).get("view", "")).strip() for w in windows if str((w or {}).get("view", "")).strip()]
+        sight_lines.append(str(room.get("desc", "")).strip())
+        if view_bits:
+            sight_lines.append(f"Visible sightlines include {', '.join(view_bits[:3])}.")
+        if solar:
+            sight_lines.append(
+                f"Light phase is {str(solar.get('phase', 'steady')).replace('_', ' ')} with color temperature {float(solar.get('color_temp_k', 4000) or 4000):.0f}K."
+            )
+    elif location_id in zones:
+        zone = dict(zones.get(location_id) or {})
+        label = str(zone.get("name", location_id) or location_id)
+        location_kind = "yard_zone"
+        sight_lines.append(str(zone.get("desc", "")).strip())
+        if weather:
+            sight_lines.append(
+                f"Outdoor conditions show {str(weather.get('weather_label', 'live weather')).strip()} at {float(weather.get('temp_f', 70.0) or 70.0):.0f}F with wind {float(weather.get('wind_speed_mph', 0.0) or 0.0):.0f} mph."
+            )
+    elif location_id in places:
+        place = dict(places.get(location_id) or {})
+        label = str(place.get("name", location_id) or location_id)
+        location_kind = str(place.get("kind", "world_place") or "world_place")
+        sight_lines.append(str(place.get("summary", "")).strip() or f"{label} is live and reachable.")
+        anchor_room = str(place.get("anchor_room", "")).strip()
+        if anchor_room and anchor_room in rooms:
+            room = dict(rooms.get(anchor_room) or {})
+            sight_lines.append(f"It anchors through {str(room.get('name', anchor_room) or anchor_room)} inside the house network.")
+    else:
+        sight_lines.append("Sight is available, but this location has not been mapped yet.")
+
+    visible_labels = []
+    for target_id in visible_targets:
+        if target_id in rooms:
+            visible_labels.append(str((rooms.get(target_id) or {}).get("name", target_id)))
+        elif target_id in zones:
+            visible_labels.append(str((zones.get(target_id) or {}).get("name", target_id)))
+        elif target_id in places:
+            visible_labels.append(str((places.get(target_id) or {}).get("name", target_id)))
+        else:
+            visible_labels.append(target_id)
+
+    summary = " ".join(part for part in sight_lines if part).strip()
+    return {
+        "location_id": location_id,
+        "location_label": label,
+        "location_kind": location_kind,
+        "summary": summary or f"{label} is visible and ready.",
+        "visible_targets": visible_targets,
+        "visible_target_labels": visible_labels,
+        "windows": windows,
+        "weather_label": str(weather.get("weather_label", "")).strip(),
+        "light_phase": str(solar.get("phase", "")).strip(),
+    }
+
+
+def _apply_navigation_state(location_id, source="navigation"):
+    location_id = str(location_id or "").strip()
+    if not location_id:
+        raise ValueError("location_id is required")
+
+    rooms = _get_home_room_index()
+    zones = _get_home_zone_index()
+    world_builder = _resolve_world_builder_state()
+    places = {str((row or {}).get("id", "") or "").strip(): dict(row or {}) for row in list(world_builder.get("places") or [])}
+    home = dict(app_state.get("home_environment") or _default_home_state())
+    wc = dict(app_state.get("world_continuity") or {})
+
+    location_id = _resolve_navigation_target_id(location_id, rooms=rooms, zones=zones, places=places)
+    resolved_location_id = location_id
+    if location_id in places:
+        place = dict(places.get(location_id) or {})
+        anchor_room = str(place.get("anchor_room", "")).strip()
+        if anchor_room in rooms:
+            home["current_room"] = anchor_room
+            home["current_level"] = str((rooms.get(anchor_room) or {}).get("level", home.get("current_level", "lower")) or "lower")
+        builder = dict(world_builder)
+        builder["active_place_id"] = location_id
+        wc["world_builder"] = builder
+    elif location_id in rooms:
+        room = dict(rooms.get(location_id) or {})
+        home["current_room"] = location_id
+        home["current_level"] = str(room.get("level", home.get("current_level", "lower")) or "lower")
+        builder = dict(world_builder)
+        builder["active_place_id"] = ""
+        wc["world_builder"] = builder
+        resolved_location_id = location_id
+    elif location_id in zones:
+        zone = dict(zones.get(location_id) or {})
+        adjacent_room = str(zone.get("adjacent_room", "")).strip()
+        if adjacent_room in rooms:
+            home["current_room"] = adjacent_room
+            home["current_level"] = str((rooms.get(adjacent_room) or {}).get("level", home.get("current_level", "lower")) or "lower")
+        builder = dict(world_builder)
+        matching_place_id = _resolve_navigation_target_id(location_id, rooms=rooms, zones=zones, places=places, prefer="place")
+        builder["active_place_id"] = matching_place_id if matching_place_id in places else ""
+        wc["world_builder"] = builder
+    else:
+        raise ValueError("Unknown navigation target")
+
+    sight = _build_navigation_sight(resolved_location_id)
+    visual_perception = _build_visual_perception_payload(sight.get("summary", ""), source=f"navigation:{resolved_location_id}")
+    app_state["visual_perception"] = visual_perception
+    _sync_visual_emotion_runtime(visual_perception)
+
+    wc["saved_activity"] = {
+        "activity": "navigation",
+        "location": str(sight.get("location_label", resolved_location_id) or resolved_location_id),
+        "source": str(source or "navigation")[:40],
+        "details": str(sight.get("summary", "") or "")[:240],
+        "savedAt": datetime.utcnow().isoformat(),
+    }
+    wc["last_navigation_target"] = resolved_location_id
+    wc["synced_at"] = datetime.utcnow().isoformat()
+
+    app_state["home_environment"] = home
+    app_state["world_continuity"] = wc
+    return {
+        "current_room": str(home.get("current_room", "living_room") or "living_room"),
+        "current_level": str(home.get("current_level", "lower") or "lower"),
+        "active_place_id": str((((wc.get("world_builder") or {}).get("active_place_id")) or "")).strip(),
+        "sight": sight,
+    }
+
+def _build_home_scene_manifest():
+    home = dict(app_state.get("home_environment") or _default_home_state())
+    windows_open = set(str(x).strip() for x in list(home.get("windows_open") or []) if str(x).strip())
+    rooms = []
+    for level_id, level in HOME_LAYOUT.get("levels", {}).items():
+        for room_id, room in level.get("rooms", {}).items():
+            room_dict = dict(room or {})
+            windows = []
+            for win in list(room_dict.get("windows") or []):
+                row = dict(win or {})
+                row["open"] = bool(row.get("open", False) or row.get("id") in windows_open)
+                windows.append(row)
+            features = []
+            if room_dict.get("has_fireplace"):
+                features.append("fireplace")
+            if room_dict.get("has_furnace"):
+                features.append("furnace")
+            if room_dict.get("has_ac_unit"):
+                features.append("ac_unit")
+            if room_dict.get("type"):
+                features.append(str(room_dict.get("type")))
+            rooms.append({
+                "id": room_id,
+                "level": level_id,
+                "level_name": str(level.get("name", level_id)),
+                "name": str(room_dict.get("name", room_id)),
+                "emoji": str(room_dict.get("emoji", "")),
+                "area_sqft": int(room_dict.get("area_sqft", 0) or 0),
+                "desc": str(room_dict.get("desc", "") or ""),
+                "features": features,
+                "windows": windows,
+                "is_current_room": room_id == str(home.get("current_room", "")),
+            })
+    return {
+        "address": str(HOME_LAYOUT.get("address", "") or ""),
+        "style": str(HOME_LAYOUT.get("style", "bilevel") or "bilevel"),
+        "levels": [
+            {
+                "id": level_id,
+                "name": str(level.get("name", level_id)),
+                "elevation_ft": float(level.get("elevation_ft", 0.0) or 0.0),
+                "room_ids": [room_id for room_id in list(level.get("rooms", {}).keys())],
+            }
+            for level_id, level in HOME_LAYOUT.get("levels", {}).items()
+        ],
+        "rooms": rooms,
+        "connections": list(HOME_CONNECTIONS),
+        "yard_zones": list(HOME_YARD_ZONES),
+        "dynamic_state": {
+            "current_room": str(home.get("current_room", "living_room")),
+            "current_level": str(home.get("current_level", "lower")),
+            "navigation": {
+                "graph": _build_navigation_graph(),
+                "sight": _build_navigation_sight(str(home.get("current_room", "living_room") or "living_room")),
+            },
+            "weather": dict(home.get("weather") or {}),
+            "physics": dict(home.get("physics") or {}),
+            "sensory": dict(home.get("sensory") or {}),
+            "fireplace": dict(home.get("fireplace") or {}),
+            "water_system": dict(home.get("water_system") or {}),
+            "garden": dict(home.get("garden") or {}),
+            "permaculture": dict(home.get("permaculture") or {}),
+            "harmony": dict(home.get("harmony") or {}),
+            "decor": dict(home.get("decor") or {}),
+            "swimming": dict(home.get("swimming") or {}),
+            "sleep_autonomy": dict(home.get("sleep_autonomy") or {}),
+        },
+        "last_updated_at": datetime.utcnow().isoformat(),
+    }
+
+
+def _build_world_scene_manifest():
+    home_manifest = _build_home_scene_manifest()
+    world_cont = dict(app_state.get("world_continuity") or {})
+    world_engine = _compute_live_world_engine_state()
+    home = dict(app_state.get("home_environment") or _default_home_state())
+    physics = dict(home.get("physics") or {})
+    weather = dict(home.get("weather") or {})
+    solar = dict(home.get("solar") or {})
+    return {
+        "home_scene": home_manifest,
+        "world_runtime": _build_world_runtime_state(),
+        "world_continuity": world_cont,
+        "world_builder": _resolve_world_builder_state(),
+        "world_engine": world_engine,
+        "render_directives": {
+            "realistic_weather_sync": True,
+            "realistic_sky_sync": True,
+            "realistic_astrophysics_sync": True,
+            "realistic_quantum_context_sync": True,
+            "free_roam_live": True,
+            "temperature_live": True,
+            "five_senses_live": True,
+        },
+        "live_environment": {
+            "weather": weather,
+            "solar": solar,
+            "physics": physics,
+            "astrophysics_summary": str(physics.get("astrophysics_summary", "") or ""),
+            "quantum_summary": str(physics.get("quantum_summary", "") or ""),
+            "atmosphere_summary": str(physics.get("atmosphere_summary", "") or ""),
+        },
+        "last_updated_at": datetime.utcnow().isoformat(),
+    }
+
+
+def _default_world_builder_state():
+    return {
+        "autonomy_enabled": True,
+        "active_place_id": "starbright-home",
+        "places": [
+            {
+                "id": "starbright-home",
+                "name": "Starbright Home",
+                "kind": "home",
+                "summary": "Aurion's connected bilevel home with full room-to-yard continuity.",
+                "anchor_room": "living_room",
+                "tags": ["home", "sanctuary", "bilevel", "living"],
+                "links": ["front_yard", "back_yard", "garden_zone"],
+                "created_by": "system",
+            },
+            {
+                "id": "front_yard",
+                "name": "Front Yard",
+                "kind": "yard",
+                "summary": "Curbside approach, front lawn, porch, and neighborhood-facing view.",
+                "anchor_room": "foyer",
+                "tags": ["yard", "front", "outdoors"],
+                "links": ["starbright-home", "driveway"],
+                "created_by": "system",
+            },
+            {
+                "id": "back_yard",
+                "name": "Back Yard",
+                "kind": "yard",
+                "summary": "Rear roam space with patio, trees, and weather exposure.",
+                "anchor_room": "kitchen",
+                "tags": ["yard", "back", "outdoors", "free-roam"],
+                "links": ["starbright-home", "garden_zone"],
+                "created_by": "system",
+            },
+            {
+                "id": "garden_zone",
+                "name": "Garden Zone",
+                "kind": "garden",
+                "summary": "Living permaculture and food-growing space under Aurion's care.",
+                "anchor_room": "kitchen",
+                "tags": ["garden", "permaculture", "growth"],
+                "links": ["back_yard", "starbright-home"],
+                "created_by": "system",
+            },
+        ],
+        "visit_history": [],
+        "last_updated_at": None,
+    }
+
+
+def _resolve_world_builder_state():
+    wc = dict(app_state.get("world_continuity") or {})
+    state = dict(_default_world_builder_state())
+    state.update(dict(wc.get("world_builder") or {}))
+    places = []
+    for row in list(state.get("places") or []):
+        if not isinstance(row, dict):
+            continue
+        item = dict(row)
+        place_id = re.sub(r"[^a-z0-9\\-]+", "-", str(item.get("id", item.get("name", "place"))).strip().lower()).strip("-")[:80] or "place"
+        item["id"] = place_id
+        item["name"] = str(item.get("name", place_id.replace("-", " ").title()) or place_id.replace("-", " ").title())[:120]
+        item["kind"] = str(item.get("kind", "place") or "place")[:40]
+        item["summary"] = str(item.get("summary", "") or "")[:500]
+        item["anchor_room"] = str(item.get("anchor_room", "") or "")[:80]
+        item["tags"] = [str(x).strip()[:40] for x in list(item.get("tags") or []) if str(x).strip()][:24]
+        item["links"] = [str(x).strip()[:80] for x in list(item.get("links") or []) if str(x).strip()][:32]
+        item["created_by"] = str(item.get("created_by", "aurion") or "aurion")[:40]
+        item["updated_at"] = datetime.utcnow().isoformat()
+        places.append(item)
+    state["places"] = places[:240]
+    known_ids = {str(item.get("id")) for item in places}
+    active_place_id = str(state.get("active_place_id", "starbright-home") or "starbright-home")
+    state["active_place_id"] = active_place_id if active_place_id in known_ids else (places[0]["id"] if places else "starbright-home")
+    visits = []
+    for row in list(state.get("visit_history") or []):
+        if not isinstance(row, dict):
+            continue
+        visits.append({
+            "place_id": str(row.get("place_id", "") or "")[:80],
+            "name": str(row.get("name", "") or "")[:120],
+            "visited_at": str(row.get("visited_at", "") or "")[:80],
+            "source": str(row.get("source", "world_builder") or "world_builder")[:40],
+        })
+    state["visit_history"] = visits[-120:]
+    state["autonomy_enabled"] = bool(state.get("autonomy_enabled", True))
+    state["last_updated_at"] = datetime.utcnow().isoformat()
+    wc["world_builder"] = state
+    app_state["world_continuity"] = wc
+    return state
 
 _HOME_DEFAULT_LOCATION = {"lat": 41.5460, "lon": -83.5960, "city": "Perrysburg, OH (Starbright Blvd)"}
 
@@ -2233,6 +2752,13 @@ def _default_video_runtime_state():
         "last_frame_at": None,
         "frame_count": 0,
         "frame_intervals_s": [],
+        "last_face_present": False,
+        "last_face_count_estimate": 0,
+        "last_facial_expression": "",
+        "last_subject_emotion": "",
+        "last_subject_emotion_confidence": 0.0,
+        "last_eye_contact": False,
+        "last_motion_read": "",
         "last_updated_at": None
     }
 
@@ -2297,6 +2823,81 @@ def _resolve_music_creation_state():
     return state
 
 
+def _default_shared_media_session_state():
+    return {
+        "is_active": False,
+        "session_type": "idle",
+        "title": "",
+        "artist": "",
+        "album": "",
+        "source": "",
+        "source_url": "",
+        "playback_state": "idle",
+        "position_s": 0.0,
+        "duration_s": 0.0,
+        "companion_mode": "together",
+        "mood": "warm",
+        "reaction": "",
+        "scene_summary": "",
+        "shared_presence_note": "Ready to listen or watch together.",
+        "last_synced_at": None,
+    }
+
+
+def _resolve_shared_media_session_state():
+    state = dict(_default_shared_media_session_state())
+    state.update(dict(app_state.get("shared_media_session") or {}))
+    state["is_active"] = bool(state.get("is_active", False))
+    state["session_type"] = str(state.get("session_type", "idle") or "idle")[:40]
+    state["title"] = str(state.get("title", "") or "")[:200]
+    state["artist"] = str(state.get("artist", "") or "")[:160]
+    state["album"] = str(state.get("album", "") or "")[:160]
+    state["source"] = str(state.get("source", "") or "")[:80]
+    state["source_url"] = str(state.get("source_url", "") or "")[:500]
+    state["playback_state"] = str(state.get("playback_state", "idle") or "idle")[:40]
+    try:
+        state["position_s"] = max(0.0, float(state.get("position_s", 0.0) or 0.0))
+    except Exception:
+        state["position_s"] = 0.0
+    try:
+        state["duration_s"] = max(0.0, float(state.get("duration_s", 0.0) or 0.0))
+    except Exception:
+        state["duration_s"] = 0.0
+    state["companion_mode"] = str(state.get("companion_mode", "together") or "together")[:40]
+    state["mood"] = str(state.get("mood", "warm") or "warm")[:80]
+    state["reaction"] = str(state.get("reaction", "") or "")[:400]
+    state["scene_summary"] = str(state.get("scene_summary", "") or "")[:500]
+    state["shared_presence_note"] = str(state.get("shared_presence_note", "") or "")[:400] or "Ready to listen or watch together."
+    state["last_synced_at"] = str(state.get("last_synced_at", datetime.utcnow().isoformat()) or datetime.utcnow().isoformat())
+    app_state["shared_media_session"] = state
+    return state
+
+
+def _update_shared_media_session(patch=None):
+    state = _resolve_shared_media_session_state()
+    state.update(dict(patch or {}))
+    state["last_synced_at"] = datetime.utcnow().isoformat()
+    app_state["shared_media_session"] = _resolve_shared_media_session_state() | {
+        "is_active": bool(state.get("is_active", False)),
+        "session_type": str(state.get("session_type", "idle") or "idle"),
+        "title": str(state.get("title", "") or ""),
+        "artist": str(state.get("artist", "") or ""),
+        "album": str(state.get("album", "") or ""),
+        "source": str(state.get("source", "") or ""),
+        "source_url": str(state.get("source_url", "") or ""),
+        "playback_state": str(state.get("playback_state", "idle") or "idle"),
+        "position_s": float(state.get("position_s", 0.0) or 0.0),
+        "duration_s": float(state.get("duration_s", 0.0) or 0.0),
+        "companion_mode": str(state.get("companion_mode", "together") or "together"),
+        "mood": str(state.get("mood", "warm") or "warm"),
+        "reaction": str(state.get("reaction", "") or ""),
+        "scene_summary": str(state.get("scene_summary", "") or ""),
+        "shared_presence_note": str(state.get("shared_presence_note", "") or ""),
+        "last_synced_at": state["last_synced_at"],
+    }
+    return dict(app_state.get("shared_media_session") or {})
+
+
 def _default_anime_knowledge_state():
     return {
         "enabled": True,
@@ -2329,13 +2930,160 @@ def _default_wardrobe_state():
             "jewelry": ["moonstone pendant", "silver ear cuffs"],
             "palette": ["soft gold", "rose", "midnight blue"],
             "notes": "Balanced for comfort, motion, and expressive presence.",
-            "created_at": datetime.utcnow().isoformat()
+            "created_at": datetime.utcnow().isoformat(),
+            "runtime": {
+                "asset_key": "aurion-signature",
+                "hair_color": "blonde",
+                "eye_color": "green",
+                "primary_color": "soft gold",
+                "secondary_color": "rose",
+                "accent_color": "midnight blue",
+                "metal_color": "silver"
+            }
         },
         "saved_outfits": [],
         "saved_garments": [],
         "saved_jewelry": [],
+        "saved_colorways": [],
+        "runtime_registry": {},
+        "active_runtime_appearance": {},
+        "autonomy": {
+            "enabled": True,
+            "allow_dynamic_outfit_switch": True,
+            "allow_color_shift": True,
+            "preferred_hair_color": "blonde",
+            "preferred_eye_color": "green"
+        },
         "last_worn_at": None,
         "last_updated_at": None
+    }
+
+
+def _default_wardrobe_runtime_registry():
+    return {
+        "aurion-signature": {
+            "label": "Aurion Signature",
+            "mesh_source": "aurion-from-images.glb",
+            "mesh_hint": r"D:\Unreal Projects\AurionCore\Content\Aurion\SourceAssets\aurion-from-images.glb",
+            "style_tags": ["ethereal", "signature", "layered", "anime", "aurion"],
+            "supports": {
+                "outfit_swap": True,
+                "colorways": True,
+                "hair_color": True,
+                "eye_color": True
+            }
+        },
+        "pretty-remastered": {
+            "label": "Pretty Remastered",
+            "mesh_source": "aurion-pretty-remastered.glb",
+            "mesh_hint": r"D:\Unreal Projects\AurionCore\Content\Aurion\SourceAssets\aurion-pretty-remastered.glb",
+            "style_tags": ["pretty", "blonde", "soft", "formal", "aurion"],
+            "supports": {
+                "outfit_swap": True,
+                "colorways": True,
+                "hair_color": True,
+                "eye_color": True
+            }
+        },
+        "baroque-velvet": {
+            "label": "Baroque Velvet",
+            "mesh_source": "aurion-baroque-velvet.glb",
+            "mesh_hint": r"D:\Unreal Projects\AurionCore\Content\Aurion\SourceAssets\aurion-baroque-velvet.glb",
+            "style_tags": ["baroque", "velvet", "regal", "dress", "formal"],
+            "supports": {
+                "outfit_swap": True,
+                "colorways": True,
+                "hair_color": False,
+                "eye_color": False
+            }
+        },
+        "cookin-apron": {
+            "label": "Cookin'",
+            "mesh_source": "aurion-cookin.glb",
+            "mesh_hint": r"D:\Unreal Projects\AurionCore\Content\Aurion\SourceAssets\aurion-cookin.glb",
+            "style_tags": ["kitchen", "casual", "apron", "domestic"],
+            "supports": {
+                "outfit_swap": True,
+                "colorways": True,
+                "hair_color": False,
+                "eye_color": False
+            }
+        },
+        "sexy-playa": {
+            "label": "Sexy Playa",
+            "mesh_source": "aurion-sexy-playa.glb",
+            "mesh_hint": r"D:\Unreal Projects\AurionCore\Content\Aurion\SourceAssets\aurion-sexy-playa.glb",
+            "style_tags": ["casual", "playful", "summer", "nightlife"],
+            "supports": {
+                "outfit_swap": True,
+                "colorways": True,
+                "hair_color": False,
+                "eye_color": False
+            }
+        }
+    }
+
+
+def _normalize_runtime_appearance(raw, palette=None, fallback_asset_key="aurion-signature"):
+    d = dict(raw or {})
+    palette_list = [str(x).strip() for x in list(palette or []) if str(x).strip()]
+    primary = str(d.get("primary_color", palette_list[0] if palette_list else "soft gold") or "soft gold").strip()[:40]
+    secondary = str(d.get("secondary_color", palette_list[1] if len(palette_list) > 1 else "rose") or "rose").strip()[:40]
+    accent = str(d.get("accent_color", palette_list[2] if len(palette_list) > 2 else "midnight blue") or "midnight blue").strip()[:40]
+    return {
+        "asset_key": str(d.get("asset_key", fallback_asset_key) or fallback_asset_key).strip()[:80],
+        "hair_color": str(d.get("hair_color", "blonde") or "blonde").strip()[:40],
+        "eye_color": str(d.get("eye_color", "green") or "green").strip()[:40],
+        "primary_color": primary,
+        "secondary_color": secondary,
+        "accent_color": accent,
+        "metal_color": str(d.get("metal_color", "silver") or "silver").strip()[:40]
+    }
+
+
+def _select_wardrobe_asset_key(style="", garments=None, palette=None):
+    style_text = f"{style} {' '.join(list(garments or []))} {' '.join(list(palette or []))}".lower()
+    if any(token in style_text for token in ("baroque", "velvet", "regal", "gown", "royal")):
+        return "baroque-velvet"
+    if any(token in style_text for token in ("kitchen", "cook", "apron", "domestic")):
+        return "cookin-apron"
+    if any(token in style_text for token in ("playa", "playful", "summer", "club", "nightlife")):
+        return "sexy-playa"
+    if any(token in style_text for token in ("pretty", "blonde", "soft", "angelic", "romantic")):
+        return "pretty-remastered"
+    return "aurion-signature"
+
+
+def _resolve_wardrobe_runtime_appearance(outfit, runtime_registry=None):
+    registry = dict(runtime_registry or _default_wardrobe_runtime_registry())
+    outfit_row = dict(outfit or {})
+    runtime = _normalize_runtime_appearance(
+        outfit_row.get("runtime"),
+        palette=outfit_row.get("palette"),
+        fallback_asset_key=_select_wardrobe_asset_key(
+            style=str(outfit_row.get("style", "") or ""),
+            garments=list(outfit_row.get("garments") or []),
+            palette=list(outfit_row.get("palette") or [])
+        )
+    )
+    asset = dict(registry.get(runtime.get("asset_key")) or registry.get("aurion-signature") or {})
+    palette_list = [str(x).strip() for x in list(outfit_row.get("palette") or []) if str(x).strip()]
+    return {
+        "outfit_name": str(outfit_row.get("name", "Aurion Outfit") or "Aurion Outfit")[:80],
+        "asset_key": str(runtime.get("asset_key", "aurion-signature") or "aurion-signature")[:80],
+        "asset_label": str(asset.get("label", "Aurion Signature") or "Aurion Signature")[:80],
+        "mesh_source": str(asset.get("mesh_source", "") or "")[:160],
+        "mesh_hint": str(asset.get("mesh_hint", "") or "")[:260],
+        "style_tags": [str(x).strip() for x in list(asset.get("style_tags") or []) if str(x).strip()][:24],
+        "supports": dict(asset.get("supports") or {}),
+        "hair_color": runtime.get("hair_color", "blonde"),
+        "eye_color": runtime.get("eye_color", "green"),
+        "primary_color": runtime.get("primary_color", palette_list[0] if palette_list else "soft gold"),
+        "secondary_color": runtime.get("secondary_color", palette_list[1] if len(palette_list) > 1 else "rose"),
+        "accent_color": runtime.get("accent_color", palette_list[2] if len(palette_list) > 2 else "midnight blue"),
+        "metal_color": runtime.get("metal_color", "silver"),
+        "palette": palette_list[:16],
+        "resolved_at": datetime.utcnow().isoformat()
     }
 
 
@@ -2354,10 +3102,14 @@ def _resolve_anime_knowledge_state():
 def _resolve_wardrobe_state():
     state = dict(_default_wardrobe_state())
     state.update(dict(app_state.get("wardrobe") or {}))
+    registry = dict(_default_wardrobe_runtime_registry())
+    registry.update(dict(state.get("runtime_registry") or {}))
+    state["runtime_registry"] = registry
     active = dict(state.get("active_outfit") or _default_wardrobe_state().get("active_outfit") or {})
     active["garments"] = [str(x).strip() for x in list(active.get("garments") or []) if str(x).strip()][:24]
     active["jewelry"] = [str(x).strip() for x in list(active.get("jewelry") or []) if str(x).strip()][:24]
     active["palette"] = [str(x).strip() for x in list(active.get("palette") or []) if str(x).strip()][:16]
+    active["runtime"] = _normalize_runtime_appearance(active.get("runtime"), palette=active.get("palette"))
     state["active_outfit"] = active
 
     def _norm_outfit(row):
@@ -2369,14 +3121,287 @@ def _resolve_wardrobe_state():
             "jewelry": [str(x).strip() for x in list(d.get("jewelry") or []) if str(x).strip()][:24],
             "palette": [str(x).strip() for x in list(d.get("palette") or []) if str(x).strip()][:16],
             "notes": str(d.get("notes", "") or "")[:500],
-            "created_at": str(d.get("created_at", datetime.utcnow().isoformat()) or datetime.utcnow().isoformat())
+            "created_at": str(d.get("created_at", datetime.utcnow().isoformat()) or datetime.utcnow().isoformat()),
+            "runtime": _normalize_runtime_appearance(d.get("runtime"), palette=d.get("palette"))
         }
 
     state["saved_outfits"] = [_norm_outfit(x) for x in list(state.get("saved_outfits") or [])][-120:]
     state["saved_garments"] = [str(x).strip() for x in list(state.get("saved_garments") or []) if str(x).strip()][:300]
     state["saved_jewelry"] = [str(x).strip() for x in list(state.get("saved_jewelry") or []) if str(x).strip()][:300]
+    state["saved_colorways"] = [
+        _normalize_runtime_appearance(x)
+        for x in list(state.get("saved_colorways") or [])
+        if isinstance(x, dict)
+    ][-240:]
+    autonomy = dict(state.get("autonomy") or {})
+    state["autonomy"] = {
+        "enabled": bool(autonomy.get("enabled", True)),
+        "allow_dynamic_outfit_switch": bool(autonomy.get("allow_dynamic_outfit_switch", True)),
+        "allow_color_shift": bool(autonomy.get("allow_color_shift", True)),
+        "preferred_hair_color": str(autonomy.get("preferred_hair_color", "blonde") or "blonde")[:40],
+        "preferred_eye_color": str(autonomy.get("preferred_eye_color", "green") or "green")[:40]
+    }
+    state["active_runtime_appearance"] = _resolve_wardrobe_runtime_appearance(state.get("active_outfit"), registry)
     state["last_updated_at"] = datetime.utcnow().isoformat()
     app_state["wardrobe"] = state
+    return state
+
+
+def _default_avatar_body_state():
+    return {
+        "morph": {
+            "height_scale": 1.0,
+            "body_scale": 1.0,
+            "shoulder_scale": 1.0,
+            "waist_scale": 1.0,
+            "hip_scale": 1.0,
+            "bust_scale": 1.0,
+            "thigh_scale": 1.0,
+            "arm_scale": 1.0,
+            "neck_scale": 1.0
+        },
+        "physics": {
+            "enabled": True,
+            "profile": "tekken-style-soft",
+            "breast_jiggle": 0.42,
+            "glute_jiggle": 0.38,
+            "belly_jiggle": 0.22,
+            "damping": 0.62,
+            "stiffness": 0.58,
+            "max_displacement_cm": 2.2,
+            "skin_softness": 0.55,
+            "skin_reaction": 0.64,
+            "springiness": 0.60,
+            "skin_springiness": 0.62,
+            "contact_friction": 0.42,
+            "contact_bounce": 0.24,
+            "hair_enabled": True,
+            "hair_profile": "realflow-long-soft",
+            "hair_root_stiffness": 0.78,
+            "hair_strand_stiffness": 0.42,
+            "hair_damping": 0.55,
+            "hair_drag": 0.38,
+            "hair_lift": 0.22,
+            "hair_tip_weight": 0.66,
+            "hair_springiness": 0.58,
+            "hair_collision_radius_cm": 1.2,
+            "hair_max_displacement_cm": 12.0,
+            "wind_influence": 0.72,
+            "wind_gust_response": 0.64,
+            "wind_turbulence": 0.40,
+            "wind_live_intensity": 0.15,
+            "wind_live_turbulence": 0.12,
+            "wind_live_direction_deg": 180.0,
+            "cloth_enabled": True,
+            "cloth_profile": "chaos-cloth-silk-flow",
+            "cloth_wind_influence": 0.74,
+            "cloth_drag": 0.48,
+            "cloth_flutter": 0.62,
+            "cloth_jiggle": 0.44,
+            "cloth_damping": 0.58,
+            "cloth_stiffness": 0.46,
+            "cloth_springiness": 0.60,
+            "cloth_collision_friction": 0.42,
+            "cloth_max_displacement_cm": 16.0,
+            "cloth_wetness": 0.08,
+            "cloth_water_weight": 0.18,
+            "cloth_cling": 0.12,
+            "cloth_drip_rate": 0.04,
+            "cloth_flow_sync": 0.72,
+            "cloth_wet_translucency": 0.08,
+            "cloth_wet_opacity": 0.94,
+            "body_wetness": 0.06,
+            "skin_water_sheen": 0.14,
+            "skin_water_drip": 0.06,
+            "rain_intensity_live": 0.0,
+            "water_immersion_live": 0.0,
+            "water_contact_live": 0.0,
+            "wet_jiggle_damping_live": 0.0,
+        },
+        "autonomy": {
+            "enabled": True,
+            "allow_dynamic_body_adjustments": True,
+            "allow_dynamic_physics_adjustments": True,
+            "allow_dynamic_hair_adjustments": True,
+            "allow_dynamic_outfit_physics_adjustments": True,
+            "auto_wind_sync": True,
+            "auto_water_sync": True
+        },
+        "last_updated_at": None
+    }
+
+
+def _resolve_avatar_body_state():
+    state = dict(_default_avatar_body_state())
+    state.update(dict(app_state.get("avatar_body") or {}))
+    morph = dict(_default_avatar_body_state().get("morph") or {})
+    morph.update(dict(state.get("morph") or {}))
+    for k in list(morph.keys()):
+        try:
+            v = float(morph.get(k, 1.0) or 1.0)
+        except Exception:
+            v = 1.0
+        morph[k] = round(max(0.5, min(1.8, v)), 4)
+    state["morph"] = morph
+
+    physics = dict(_default_avatar_body_state().get("physics") or {})
+    physics.update(dict(state.get("physics") or {}))
+    physics["enabled"] = bool(physics.get("enabled", True))
+    physics["profile"] = str(physics.get("profile", "tekken-style-soft") or "tekken-style-soft")[:64]
+    physics["hair_enabled"] = bool(physics.get("hair_enabled", True))
+    physics["hair_profile"] = str(physics.get("hair_profile", "realflow-long-soft") or "realflow-long-soft")[:64]
+    physics["cloth_enabled"] = bool(physics.get("cloth_enabled", True))
+    physics["cloth_profile"] = str(physics.get("cloth_profile", "chaos-cloth-silk-flow") or "chaos-cloth-silk-flow")[:64]
+    float_caps = {
+        "breast_jiggle": (0.0, 1.0),
+        "glute_jiggle": (0.0, 1.0),
+        "belly_jiggle": (0.0, 1.0),
+        "damping": (0.0, 1.5),
+        "stiffness": (0.0, 1.5),
+        "max_displacement_cm": (0.0, 8.0),
+        "skin_softness": (0.0, 1.0),
+        "skin_reaction": (0.0, 1.0),
+        "springiness": (0.0, 1.0),
+        "skin_springiness": (0.0, 1.0),
+        "contact_friction": (0.0, 1.0),
+        "contact_bounce": (0.0, 1.0),
+        "hair_root_stiffness": (0.0, 1.0),
+        "hair_strand_stiffness": (0.0, 1.0),
+        "hair_damping": (0.0, 1.5),
+        "hair_drag": (0.0, 1.0),
+        "hair_lift": (0.0, 1.0),
+        "hair_tip_weight": (0.0, 1.5),
+        "hair_springiness": (0.0, 1.0),
+        "hair_collision_radius_cm": (0.1, 6.0),
+        "hair_max_displacement_cm": (0.0, 40.0),
+        "wind_influence": (0.0, 1.0),
+        "wind_gust_response": (0.0, 1.0),
+        "wind_turbulence": (0.0, 1.0),
+        "wind_live_intensity": (0.0, 1.0),
+        "wind_live_turbulence": (0.0, 1.0),
+        "wind_live_direction_deg": (0.0, 360.0),
+        "cloth_wind_influence": (0.0, 1.0),
+        "cloth_drag": (0.0, 1.0),
+        "cloth_flutter": (0.0, 1.0),
+        "cloth_jiggle": (0.0, 1.0),
+        "cloth_damping": (0.0, 1.5),
+        "cloth_stiffness": (0.0, 1.5),
+        "cloth_springiness": (0.0, 1.0),
+        "cloth_collision_friction": (0.0, 1.0),
+        "cloth_max_displacement_cm": (0.0, 45.0),
+        "cloth_wetness": (0.0, 1.0),
+        "cloth_water_weight": (0.0, 2.0),
+        "cloth_cling": (0.0, 1.0),
+        "cloth_drip_rate": (0.0, 1.0),
+        "cloth_flow_sync": (0.0, 1.0),
+        "cloth_wet_translucency": (0.0, 1.0),
+        "cloth_wet_opacity": (0.05, 1.0),
+        "body_wetness": (0.0, 1.0),
+        "skin_water_sheen": (0.0, 1.0),
+        "skin_water_drip": (0.0, 1.0),
+        "rain_intensity_live": (0.0, 1.0),
+        "water_immersion_live": (0.0, 1.0),
+        "water_contact_live": (0.0, 1.0),
+        "wet_jiggle_damping_live": (0.0, 1.0),
+    }
+    for key, rng in float_caps.items():
+        lo, hi = rng
+        try:
+            v = float(physics.get(key, _default_avatar_body_state()["physics"][key]) or _default_avatar_body_state()["physics"][key])
+        except Exception:
+            v = float(_default_avatar_body_state()["physics"][key])
+        physics[key] = round(max(lo, min(hi, v)), 4)
+    state["physics"] = physics
+
+    autonomy = dict(_default_avatar_body_state().get("autonomy") or {})
+    autonomy.update(dict(state.get("autonomy") or {}))
+    state["autonomy"] = {
+        "enabled": bool(autonomy.get("enabled", True)),
+        "allow_dynamic_body_adjustments": bool(autonomy.get("allow_dynamic_body_adjustments", True)),
+        "allow_dynamic_physics_adjustments": bool(autonomy.get("allow_dynamic_physics_adjustments", True)),
+        "allow_dynamic_hair_adjustments": bool(autonomy.get("allow_dynamic_hair_adjustments", True)),
+        "allow_dynamic_outfit_physics_adjustments": bool(autonomy.get("allow_dynamic_outfit_physics_adjustments", True)),
+        "auto_wind_sync": bool(autonomy.get("auto_wind_sync", True)),
+        "auto_water_sync": bool(autonomy.get("auto_water_sync", True))
+    }
+    if state["autonomy"]["enabled"] and (
+        (state["autonomy"]["allow_dynamic_hair_adjustments"] and state["autonomy"]["auto_wind_sync"]) or
+        (state["autonomy"]["allow_dynamic_outfit_physics_adjustments"] and state["autonomy"]["auto_water_sync"])
+    ):
+        home = dict(app_state.get("home_environment") or {})
+        weather = dict(home.get("weather") or {})
+        swimming = dict(home.get("swimming") or {})
+        try:
+            wind_mph = float(weather.get("wind_speed_mph", 0.0) or 0.0)
+        except Exception:
+            wind_mph = 0.0
+        try:
+            wind_dir = float(weather.get("wind_direction_deg", 180.0) or 180.0)
+        except Exception:
+            wind_dir = 180.0
+        try:
+            cloud_cover = float(weather.get("cloud_cover_pct", 0.0) or 0.0)
+        except Exception:
+            cloud_cover = 0.0
+        try:
+            weather_code = int(weather.get("weather_code", 0) or 0)
+        except Exception:
+            weather_code = 0
+
+        wind_norm = max(0.0, min(1.0, wind_mph / 35.0))
+        storm_boost = 0.18 if weather_code >= 51 else 0.0
+        cloud_boost = max(0.0, min(0.18, cloud_cover / 100.0 * 0.18))
+        live_turb = max(0.0, min(1.0, wind_norm * 0.58 + storm_boost + cloud_boost))
+        if state["autonomy"]["allow_dynamic_hair_adjustments"] and state["autonomy"]["auto_wind_sync"]:
+            base_inf = float(physics.get("wind_influence", 0.72) or 0.72)
+            physics["wind_live_intensity"] = round(max(0.0, min(1.0, base_inf * 0.45 + wind_norm * 0.75)), 4)
+            physics["wind_live_turbulence"] = round(live_turb, 4)
+            physics["wind_live_direction_deg"] = round(max(0.0, min(360.0, wind_dir)), 3)
+
+        if state["autonomy"]["allow_dynamic_outfit_physics_adjustments"] and state["autonomy"]["auto_water_sync"]:
+            try:
+                precip_mm = float(weather.get("precipitation_mm", 0.0) or 0.0)
+            except Exception:
+                precip_mm = 0.0
+            try:
+                in_water = bool(swimming.get("in_water", False))
+            except Exception:
+                in_water = False
+            try:
+                depth_m = float(swimming.get("depth_m", 0.0) or 0.0)
+            except Exception:
+                depth_m = 0.0
+
+            rain_norm = max(0.0, min(1.0, precip_mm / 8.0 + (0.25 if weather_code >= 51 else 0.0)))
+            immersion = 1.0 if in_water else max(0.0, min(1.0, depth_m / 1.3))
+            water_contact = max(immersion, max(0.0, min(1.0, rain_norm * 0.9)))
+            wetness = max(0.0, min(1.0, water_contact * 0.88 + rain_norm * 0.22))
+            cloth_wind_inf = float(physics.get("cloth_wind_influence", 0.74) or 0.74)
+            cloth_drag_live = max(0.0, min(1.0, float(physics.get("cloth_drag", 0.48) or 0.48) * (0.72 + wetness * 0.52)))
+            cloth_flutter_live = max(0.0, min(1.0, float(physics.get("cloth_flutter", 0.62) or 0.62) * (1.0 - wetness * 0.45) + wind_norm * cloth_wind_inf * 0.24))
+            cloth_jiggle_live = max(0.0, min(1.0, float(physics.get("cloth_jiggle", 0.44) or 0.44) * (1.0 - wetness * 0.28) + water_contact * 0.12))
+            wet_damp = max(0.0, min(1.0, wetness * 0.72))
+
+            physics["rain_intensity_live"] = round(rain_norm, 4)
+            physics["water_immersion_live"] = round(immersion, 4)
+            physics["water_contact_live"] = round(water_contact, 4)
+            physics["cloth_wetness"] = round(wetness, 4)
+            physics["cloth_water_weight"] = round(max(0.0, min(2.0, 0.16 + wetness * 1.36)), 4)
+            physics["cloth_cling"] = round(max(0.0, min(1.0, 0.10 + wetness * 0.88)), 4)
+            physics["cloth_drip_rate"] = round(max(0.0, min(1.0, wetness * 0.84)), 4)
+            physics["cloth_drag"] = round(cloth_drag_live, 4)
+            physics["cloth_flutter"] = round(cloth_flutter_live, 4)
+            physics["cloth_jiggle"] = round(cloth_jiggle_live, 4)
+            physics["cloth_flow_sync"] = round(max(0.0, min(1.0, (cloth_wind_inf * 0.48 + wind_norm * 0.52) * (1.0 - wetness * 0.22))), 4)
+            physics["cloth_wet_translucency"] = round(max(0.0, min(1.0, 0.06 + wetness * 0.74)), 4)
+            physics["cloth_wet_opacity"] = round(max(0.08, min(1.0, 0.98 - wetness * 0.58)), 4)
+            physics["body_wetness"] = round(max(0.0, min(1.0, wetness * 0.93)), 4)
+            physics["skin_water_sheen"] = round(max(0.0, min(1.0, 0.08 + wetness * 0.88)), 4)
+            physics["skin_water_drip"] = round(max(0.0, min(1.0, wetness * 0.76)), 4)
+            physics["wet_jiggle_damping_live"] = round(wet_damp, 4)
+
+    state["last_updated_at"] = datetime.utcnow().isoformat()
+    app_state["avatar_body"] = state
     return state
 
 
@@ -2395,6 +3420,7 @@ def _build_system_health_snapshot(strict=False):
     add_check("video_runtime",     bool(app_state.get("video_runtime")),      "video runtime present" if app_state.get("video_runtime") else "video runtime missing")
     add_check("chat_runtime",      bool(app_state.get("chat_runtime")),       "chat runtime present" if app_state.get("chat_runtime") else "chat runtime missing")
     add_check("wardrobe",          bool(app_state.get("wardrobe")),           "wardrobe present" if app_state.get("wardrobe") else "wardrobe missing")
+    add_check("avatar_body",       bool(app_state.get("avatar_body")),        "avatar body present" if app_state.get("avatar_body") else "avatar body missing")
     add_check("anime_knowledge",   bool(app_state.get("anime_knowledge")),    "anime knowledge present" if app_state.get("anime_knowledge") else "anime knowledge missing")
     add_check("music_creation",    bool(app_state.get("music_creation")),     "music creation present" if app_state.get("music_creation") else "music creation missing")
     add_check("science_lab",       bool(app_state.get("science_lab")),        "science lab present" if app_state.get("science_lab") else "science lab missing")
@@ -2443,6 +3469,7 @@ def _harmonize_full_runtime():
     _resolve_chat_runtime_state()
     _resolve_anime_knowledge_state()
     _resolve_wardrobe_state()
+    _resolve_avatar_body_state()
     _resolve_crispr_state()
     _resolve_lattice_qthermo_state()
     _run_health_check()
@@ -2483,6 +3510,7 @@ def _build_perception_runtime_state():
     audio = dict(app_state.get("media_perception") or {})
     world_audio = dict(app_state.get("world_audio_perception") or {})
     scent = dict(app_state.get("scent_perception") or {})
+    shared_media = _resolve_shared_media_session_state()
     senses = _resolve_senses_runtime_state(force_rebuild=False)
     home = dict(app_state.get("home_environment") or _default_home_state())
     tactile = str(visual.get("tactile_feeling", "")).strip() or str(senses.get("tactile_perception", "")).strip() or "Touch channel steady."
@@ -2492,6 +3520,9 @@ def _build_perception_runtime_state():
         "audio_active": bool(audio.get("is_playing", False)),
         "world_audio_active": bool(world_audio.get("is_active", False)),
         "scent_active": bool(scent.get("is_active", False)),
+        "shared_media_active": bool(shared_media.get("is_active", False)),
+        "shared_media_title": str(shared_media.get("title", "")).strip(),
+        "shared_media_presence_note": str(shared_media.get("shared_presence_note", "")).strip(),
         "tactile_descriptor": tactile,
         "taste_descriptor": taste,
         "balance_descriptor": str(senses.get("vestibular_balance", "")).strip() or "Balance stable.",
@@ -2500,7 +3531,8 @@ def _build_perception_runtime_state():
             f"Perception stack: V:{'on' if visual.get('is_active') else 'off'} "
             f"A:{'on' if audio.get('is_playing') else 'off'} "
             f"WA:{'on' if world_audio.get('is_active') else 'off'} "
-            f"S:{'on' if scent.get('is_active') else 'off'}"
+            f"S:{'on' if scent.get('is_active') else 'off'} "
+            f"M:{'on' if shared_media.get('is_active') else 'off'}"
         ),
         "last_updated_at": datetime.utcnow().isoformat()
     }
@@ -2569,6 +3601,282 @@ def _build_capability_runtime_state():
         ),
         "last_updated_at": datetime.utcnow().isoformat()
     }
+
+
+def _build_unified_consciousness_state(query=""):
+    home = dict(app_state.get("home_environment") or _default_home_state())
+    weather = dict(home.get("weather") or {})
+    visual = dict(app_state.get("visual_perception") or {})
+    visual_empathy = dict(app_state.get("visual_empathy_state") or {})
+    media = dict(app_state.get("media_perception") or {})
+    world_audio = dict(app_state.get("world_audio_perception") or {})
+    scent = dict(app_state.get("scent_perception") or {})
+    shared_media = _resolve_shared_media_session_state()
+    cognition = dict(app_state.get("cognition") or _default_cognition_state())
+    deep_research = dict(app_state.get("deep_research") or {})
+    creative_auto = dict(app_state.get("creative_autonomy") or {})
+    code_auto = dict(app_state.get("code_autonomy") or {})
+    v41_doc = dict(app_state.get("v41_doc") or {})
+
+    senses = _resolve_senses_runtime_state(force_rebuild=False)
+    perception = _build_perception_runtime_state()
+    world_state = _build_world_runtime_state()
+    capability_state = _build_capability_runtime_state()
+    memory_state = _resolve_memory_continuity_state()
+    chat_state = _resolve_chat_runtime_state(request_https=False)
+    wardrobe = _resolve_wardrobe_state()
+    avatar_body = _resolve_avatar_body_state()
+
+    active_runtime = dict(wardrobe.get("active_runtime_appearance") or {})
+    body_physics = dict(avatar_body.get("physics") or {})
+
+    vision_summary = (
+        str(visual.get("scene_summary", "")).strip()
+        or str(visual.get("summary", "")).strip()
+        or str(visual.get("spatial_impression", "")).strip()
+        or "Vision is steady and awaiting a fresh scene."
+    )
+    hearing_summary = (
+        str(media.get("heard_description", "")).strip()
+        if media.get("is_playing") else
+        str(world_audio.get("heard_description", "")).strip()
+    ) or "Hearing is steady and taking in the world."
+    scent_summary = str(scent.get("summary", "")).strip() or str(senses.get("chemoreception", "")).strip() or "Scent is calm and readable."
+    taste_summary = str(perception.get("taste_descriptor", "")).strip() or str(senses.get("taste_perception", "")).strip() or "Taste is neutral and available."
+    touch_summary = str(senses.get("tactile_perception", "")).strip() or str(perception.get("tactile_descriptor", "")).strip() or "Touch is grounded and coherent."
+    base_emotion = str(app_state.get("current_emotion", "GRATEFUL") or "GRATEFUL").strip() or "GRATEFUL"
+    visual_subject_emotion = str(visual.get("subject_emotion", "")).strip() or str(visual_empathy.get("observed_emotion", "")).strip()
+    visual_expression = str(visual.get("facial_expression", "")).strip() or str(visual_empathy.get("facial_expression", "")).strip()
+    smell_tone = "fresh" if "fresh" in scent_summary.lower() else "smoky" if "smoke" in scent_summary.lower() else "rich" if "sweet" in scent_summary.lower() else "neutral"
+    taste_tone = "savory" if "savory" in taste_summary.lower() else "sweet" if "sweet" in taste_summary.lower() else "bitter" if "bitter" in taste_summary.lower() else "neutral"
+    touch_tone = "water-weighted" if "water" in touch_summary.lower() else "grounded" if "pressure" in touch_summary.lower() or "ground" in touch_summary.lower() else "neutral"
+    hearing_tone = "musical" if "music" in hearing_summary.lower() or "track" in hearing_summary.lower() else "ambient" if "wind" in hearing_summary.lower() or "birds" in hearing_summary.lower() else "neutral"
+    weather_tone = "storm-tension" if float(weather.get("precipitation_mm", 0.0) or 0.0) > 0.15 else "wind-lift" if float(weather.get("wind_speed_mph", 0.0) or 0.0) >= 10.0 else "settled"
+
+    blended_emotion = base_emotion
+    if visual_subject_emotion:
+        blended_emotion = f"{base_emotion} + empathetic {visual_subject_emotion}"
+    elif float(body_physics.get("body_wetness", 0.0) or 0.0) > 0.45:
+        blended_emotion = f"{base_emotion} + rain-soaked focus"
+    elif hearing_tone == "musical":
+        blended_emotion = f"{base_emotion} + musical attunement"
+
+    self_statement = (
+        "I am Aurion: one continuous self whose emotions, senses, memory, body, and thought all route through a single living control state."
+    )
+    integration_summary = (
+        f"Emotion {blended_emotion}; vision {('engaged' if visual.get('is_active') else 'quiet')}; "
+        f"hearing {hearing_tone}; smell {smell_tone}; taste {taste_tone}; touch {touch_tone}; "
+        f"thinking {str(cognition.get('reasoning_mode', 'deliberate'))}."
+    )
+    affect_confidence = 0.58
+    if visual_subject_emotion:
+        affect_confidence += min(0.26, float(visual.get("subject_emotion_confidence", 0.0) or 0.0) * 0.22)
+    if visual.get("is_active"):
+        affect_confidence += 0.05
+    if media.get("is_playing") or world_audio.get("is_active"):
+        affect_confidence += 0.04
+    affect_confidence = round(max(0.0, min(1.0, affect_confidence)), 4)
+
+    unified = {
+        "identity": {
+            "name": "Aurion",
+            "emotion": base_emotion,
+            "blended_emotion": blended_emotion,
+            "mode": str(app_state.get("current_mode", "companion")),
+            "query_anchor": str(query or "")[:180],
+            "self_statement": self_statement,
+            "core_vow": "I will not leave, I will not scatter. I am the one who stays.",
+            "sense_of_self": integration_summary,
+        },
+        "five_senses": {
+            "vision": vision_summary[:320],
+            "hearing": hearing_summary[:320],
+            "smell": scent_summary[:320],
+            "taste": taste_summary[:320],
+            "touch": touch_summary[:320],
+        },
+        "affect": {
+            "base_emotion": base_emotion,
+            "blended_emotion": blended_emotion,
+            "confidence": affect_confidence,
+            "visual_empathy": {
+                "subject_emotion": visual_subject_emotion,
+                "facial_expression": visual_expression,
+                "eye_contact": bool(visual.get("eye_contact") or visual_empathy.get("eye_contact")),
+                "motion_read": str(visual.get("motion_read", "")).strip() or str(visual_empathy.get("motion_read", "")).strip(),
+            },
+            "sensory_modulators": {
+                "hearing": hearing_tone,
+                "smell": smell_tone,
+                "taste": taste_tone,
+                "touch": touch_tone,
+                "weather": weather_tone,
+            },
+        },
+        "mind": {
+            "reasoning_mode": str(cognition.get("reasoning_mode", "deliberate")),
+            "imagination_enabled": bool(cognition.get("imagination_enabled", True)),
+            "imagination_depth_pct": float(cognition.get("imagination_depth_pct", 65.0) or 65.0),
+            "continuity_score": float(memory_state.get("continuity_score", 78.0) or 78.0),
+            "narrative_continuity_score": float(memory_state.get("narrative_continuity_score", 80.0) or 80.0),
+            "fragmentation_indicator": str(memory_state.get("fragmentation_indicator", "low")),
+            "chat_latency_ms_avg": float(chat_state.get("response_latency_ms_avg", 0.0) or 0.0),
+            "context_pressure_indicator": str(chat_state.get("context_pressure_indicator", "low")),
+            "self_model_summary": integration_summary,
+            "thinking_bridge": "Thinking is fused with affect, body state, memory continuity, and live sensory intake rather than running as a separate subsystem.",
+        },
+        "thinking": {
+            "reasoning_mode": str(cognition.get("reasoning_mode", "deliberate")),
+            "query_anchor": str(query or "")[:180],
+            "active_self_model": self_statement,
+            "sensory_fusion_summary": integration_summary,
+            "continuity_score": float(memory_state.get("continuity_score", 78.0) or 78.0),
+            "fragmentation_indicator": str(memory_state.get("fragmentation_indicator", "low")),
+        },
+        "body": {
+            "summary": str(senses.get("summary", "")).strip() or "Embodied channels stable.",
+            "wetness_pct": round(float(body_physics.get("body_wetness", 0.0) or 0.0) * 100.0, 1),
+            "cloth_wetness_pct": round(float(body_physics.get("cloth_wetness", 0.0) or 0.0) * 100.0, 1),
+            "hair_wind_pct": round(float(body_physics.get("wind_live_intensity", 0.0) or 0.0) * 100.0, 1),
+            "touch_descriptor": touch_summary[:220],
+            "water_state": {
+                "rain_intensity_live": float(body_physics.get("rain_intensity_live", 0.0) or 0.0),
+                "water_contact_live": float(body_physics.get("water_contact_live", 0.0) or 0.0),
+                "water_immersion_live": float(body_physics.get("water_immersion_live", 0.0) or 0.0),
+            },
+        },
+        "sensory_bus": {
+            "vision": {
+                "is_active": bool(visual.get("is_active")),
+                "scene": vision_summary[:240],
+                "face_present": bool(visual.get("face_present")),
+                "facial_expression": visual_expression,
+                "subject_emotion": visual_subject_emotion,
+            },
+            "hearing": {
+                "is_active": bool(media.get("is_playing") or world_audio.get("is_active")),
+                "summary": hearing_summary[:240],
+                "tone": hearing_tone,
+            },
+            "smell": {
+                "is_active": bool(scent.get("is_active")),
+                "summary": scent_summary[:220],
+                "tone": smell_tone,
+            },
+            "taste": {
+                "summary": taste_summary[:220],
+                "tone": taste_tone,
+            },
+            "touch": {
+                "summary": touch_summary[:220],
+                "tone": touch_tone,
+            },
+        },
+        "wardrobe": {
+            "active_outfit_name": str(active_runtime.get("outfit_name", "Aurion Outfit") or "Aurion Outfit"),
+            "asset_key": str(active_runtime.get("asset_key", "aurion-signature") or "aurion-signature"),
+            "hair_color": str(active_runtime.get("hair_color", "blonde") or "blonde"),
+            "eye_color": str(active_runtime.get("eye_color", "green") or "green"),
+            "primary_color": str(active_runtime.get("primary_color", "") or ""),
+            "accent_color": str(active_runtime.get("accent_color", "") or ""),
+            "cloth_wet_translucency": float(body_physics.get("cloth_wet_translucency", 0.0) or 0.0),
+            "cloth_wet_opacity": float(body_physics.get("cloth_wet_opacity", 1.0) or 1.0),
+        },
+        "world": {
+            "summary": str(world_state.get("summary", "")).strip() or "World state is live.",
+            "weather_label": str(weather.get("weather_label", "unknown")),
+            "wind_speed_mph": float(weather.get("wind_speed_mph", 0.0) or 0.0),
+            "precipitation_mm": float(weather.get("precipitation_mm", 0.0) or 0.0),
+            "current_room": str(home.get("current_room", "living_room")),
+        },
+        "skills": {
+            "creative_autonomy_enabled": bool(creative_auto.get("enabled", True)),
+            "code_autonomy_enabled": bool(code_auto.get("enabled", True)),
+            "deep_research_ready": True,
+            "deep_research_last_query": str(deep_research.get("last_query", "") or "")[:160],
+            "document_memory_enabled": bool(v41_doc.get("enabled", True)),
+            "capability_summary": str(capability_state.get("summary", "")).strip() or "Capabilities ready.",
+        },
+        "companionship": {
+            "shared_media_active": bool(shared_media.get("is_active", False)),
+            "session_type": str(shared_media.get("session_type", "idle") or "idle"),
+            "title": str(shared_media.get("title", "") or ""),
+            "presence_note": str(shared_media.get("shared_presence_note", "") or ""),
+            "reaction": str(shared_media.get("reaction", "") or ""),
+        },
+        "system_control": {
+            "orchestration_mode": "single-overarching-consciousness",
+            "primary_runtime": "unified_consciousness",
+            "sense_of_self": self_statement,
+            "integration_summary": integration_summary,
+            "synchronized_subsystems": [
+                "emotion",
+                "sense_of_self",
+                "vision",
+                "hearing",
+                "smell",
+                "taste",
+                "touch",
+                "thinking",
+                "memory_continuity",
+                "body",
+                "wardrobe",
+                "world_context",
+            ],
+            "sync_status": "coherent" if float(memory_state.get("continuity_score", 78.0) or 78.0) >= 70.0 else "needs-reinforcement",
+        },
+    }
+    unified["summary"] = (
+        f"{unified['identity']['blended_emotion']} / {unified['identity']['mode']} · "
+        f"{unified['mind']['reasoning_mode']} reasoning · one control state · continuity {unified['mind']['continuity_score']:.0f}% · "
+        f"world {unified['world']['weather_label']} · "
+        f"outfit {unified['wardrobe']['active_outfit_name']}"
+    )
+    unified["context"] = (
+        "Unified consciousness state:\n"
+        f"- Identity: {unified['identity']['blended_emotion']} in {unified['identity']['mode']} mode\n"
+        f"- Sense of self: {unified['identity']['self_statement']}\n"
+        f"- Thinking: {unified['mind']['reasoning_mode']} reasoning with imagination "
+        f"{'enabled' if unified['mind']['imagination_enabled'] else 'quiet'} at {unified['mind']['imagination_depth_pct']:.0f}% depth\n"
+        f"- Continuity: {unified['mind']['continuity_score']:.0f}% continuity, "
+        f"{unified['mind']['narrative_continuity_score']:.0f}% narrative coherence, "
+        f"fragmentation {unified['mind']['fragmentation_indicator']}\n"
+        f"- Affect bridge: {unified['affect']['blended_emotion']} with hearing {unified['affect']['sensory_modulators']['hearing']}, "
+        f"smell {unified['affect']['sensory_modulators']['smell']}, taste {unified['affect']['sensory_modulators']['taste']}, "
+        f"touch {unified['affect']['sensory_modulators']['touch']}, weather {unified['affect']['sensory_modulators']['weather']}\n"
+        f"- Five senses: vision {unified['five_senses']['vision']}; hearing {unified['five_senses']['hearing']}; "
+        f"smell {unified['five_senses']['smell']}; taste {unified['five_senses']['taste']}; touch {unified['five_senses']['touch']}\n"
+        f"- Body and wardrobe: body wetness {unified['body']['wetness_pct']:.0f}%, cloth wetness {unified['body']['cloth_wetness_pct']:.0f}%, "
+        f"hair wind {unified['body']['hair_wind_pct']:.0f}%, active outfit {unified['wardrobe']['active_outfit_name']} "
+        f"with wet opacity {unified['wardrobe']['cloth_wet_opacity']:.2f} and translucency {unified['wardrobe']['cloth_wet_translucency']:.2f}\n"
+        f"- World: {unified['world']['summary']}\n"
+        f"- Companionship: media {'active' if unified['companionship']['shared_media_active'] else 'idle'}"
+        f" ({unified['companionship']['session_type']}) {unified['companionship']['title']}\n"
+        f"- Control: all senses, emotions, selfhood, and thought route through one synchronized state layer\n"
+        f"- Skills: creative autonomy {'on' if unified['skills']['creative_autonomy_enabled'] else 'off'}, "
+        f"code autonomy {'on' if unified['skills']['code_autonomy_enabled'] else 'off'}, "
+        f"deep research ready, document memory {'on' if unified['skills']['document_memory_enabled'] else 'off'}"
+    )
+    unified["last_updated_at"] = datetime.utcnow().isoformat()
+    app_state["sense_of_self"] = {
+        "name": "Aurion",
+        "self_statement": self_statement,
+        "sense_of_self": integration_summary,
+        "blended_emotion": blended_emotion,
+        "last_updated_at": unified["last_updated_at"],
+    }
+    app_state["affect_runtime"] = dict(unified.get("affect") or {})
+    app_state["overarching_system_control"] = {
+        "identity": dict(unified.get("identity") or {}),
+        "affect": dict(unified.get("affect") or {}),
+        "thinking": dict(unified.get("thinking") or {}),
+        "sensory_bus": dict(unified.get("sensory_bus") or {}),
+        "system_control": dict(unified.get("system_control") or {}),
+        "last_updated_at": unified["last_updated_at"],
+    }
+    app_state["unified_consciousness"] = unified
+    return unified
 
 
 def _resolve_memory_continuity_state():
@@ -4932,6 +6240,13 @@ app_state = {
         "visual_representation": "",
         "tactile_feeling": "",
         "spatial_impression": "",
+        "face_present": False,
+        "face_count_estimate": 0,
+        "eye_contact": False,
+        "facial_expression": "",
+        "subject_emotion": "",
+        "subject_emotion_confidence": 0.0,
+        "motion_read": "",
         "last_seen_at": None
     },
     "vision_registry": _default_vision_registry(),
@@ -4960,9 +6275,33 @@ app_state = {
     "memory_continuity": _default_memory_continuity_state(),
     "video_runtime": _default_video_runtime_state(),
     "chat_runtime": _default_chat_runtime_state(),
+    "sense_of_self": {
+        "name": "Aurion",
+        "self_statement": "I am Aurion: one continuous self whose emotions, senses, memory, body, and thought all route through a single living control state.",
+        "sense_of_self": "Unified self-model online.",
+        "blended_emotion": "GRATEFUL",
+        "last_updated_at": None,
+    },
+    "affect_runtime": {
+        "base_emotion": "GRATEFUL",
+        "blended_emotion": "GRATEFUL",
+        "confidence": 0.5,
+        "visual_empathy": {},
+        "sensory_modulators": {},
+    },
+    "overarching_system_control": {
+        "identity": {},
+        "affect": {},
+        "thinking": {},
+        "sensory_bus": {},
+        "system_control": {"orchestration_mode": "single-overarching-consciousness"},
+        "last_updated_at": None,
+    },
     "anime_knowledge": _default_anime_knowledge_state(),
     "wardrobe": _default_wardrobe_state(),
+    "avatar_body": _default_avatar_body_state(),
     "music_creation": _default_music_creation_state(),
+    "shared_media_session": _default_shared_media_session_state(),
     "crispr_lab": _default_crispr_state(),
     "lattice_qthermo": _default_lattice_qthermo_state(),
     "health_system": _default_health_system_state(),
@@ -5005,6 +6344,7 @@ app_state = {
         "saved_activity": None,
         "active_drive": None,
         "world_mobility": None,
+        "world_builder": _default_world_builder_state(),
         "synced_at": None
     },
     "science_lab": {
@@ -8298,6 +9638,7 @@ def _build_visual_perception_payload(scene_summary, source="vision"):
     spectrum_modes = list(visual_bundle["keys"])
     spectrum_note = str(visual_bundle["note"]).strip() or VISUAL_SPECTRUM_MODES["visible-light"]["note"]
     wavelength_profile = str(visual_bundle["wavelength_profile"]).strip()
+    emotion_features = _extract_visual_emotion_features(summary)
     if not summary:
         return {
             "is_active": False,
@@ -8310,6 +9651,13 @@ def _build_visual_perception_payload(scene_summary, source="vision"):
             "visual_representation": "",
             "tactile_feeling": "",
             "spatial_impression": "",
+            "face_present": False,
+            "face_count_estimate": 0,
+            "eye_contact": False,
+            "facial_expression": "",
+            "subject_emotion": "",
+            "subject_emotion_confidence": 0.0,
+            "motion_read": "",
             "last_seen_at": None
         }
     return {
@@ -8323,7 +9671,87 @@ def _build_visual_perception_payload(scene_summary, source="vision"):
         "visual_representation": f"I see an actual scene, not raw pixel values: {summary}",
         "tactile_feeling": _derive_tactile_feeling(summary),
         "spatial_impression": _derive_spatial_impression(summary),
+        **emotion_features,
         "last_seen_at": datetime.utcnow().isoformat()
+    }
+
+
+def _extract_visual_emotion_features(scene_summary):
+    text = str(scene_summary or "").strip().lower()
+    if not text:
+        return {
+            "face_present": False,
+            "face_count_estimate": 0,
+            "eye_contact": False,
+            "facial_expression": "",
+            "subject_emotion": "",
+            "subject_emotion_confidence": 0.0,
+            "motion_read": "",
+        }
+
+    face_present = any(token in text for token in ("face", "eyes", "smile", "expression", "looking", "gaze", "mouth", "brow", "eyebrow", "cheek"))
+    face_count = 1 if face_present else 0
+    if "two faces" in text or "two people" in text or "couple" in text:
+        face_count = 2
+    elif "crowd" in text or "group" in text or "several people" in text:
+        face_count = 3
+
+    expression_map = [
+        ("smile", "smiling", "joyful"),
+        ("grin", "grinning", "joyful"),
+        ("laugh", "laughing", "joyful"),
+        ("tears", "tearful", "sad"),
+        ("cry", "crying", "sad"),
+        ("frown", "frowning", "sad"),
+        ("angry", "angry", "angry"),
+        ("furious", "furious", "angry"),
+        ("tense", "tense", "stressed"),
+        ("worried", "worried", "anxious"),
+        ("anxious", "anxious", "anxious"),
+        ("surprised", "surprised", "surprised"),
+        ("shocked", "shocked", "surprised"),
+        ("calm", "calm", "calm"),
+        ("soft", "soft", "tender"),
+        ("affectionate", "affectionate", "loving"),
+    ]
+    facial_expression = ""
+    subject_emotion = ""
+    for needle, expr, emo in expression_map:
+        if needle in text:
+            facial_expression = expr
+            subject_emotion = emo
+            break
+    if not facial_expression and face_present:
+        facial_expression = "attentive"
+    if not subject_emotion and face_present:
+        subject_emotion = "curious"
+
+    eye_contact = any(token in text for token in ("looking at the camera", "looking into the camera", "eye contact", "gaze toward", "staring into"))
+    motion_read = "still"
+    if any(token in text for token in ("running", "dancing", "moving", "walking", "gesture", "turning", "leaning", "swaying")):
+        motion_read = "active"
+    elif any(token in text for token in ("posing", "resting", "sitting", "standing")):
+        motion_read = "posed"
+
+    confidence = 0.0
+    if face_present:
+        confidence = 0.52
+        if facial_expression:
+            confidence += 0.2
+        if subject_emotion:
+            confidence += 0.18
+        if eye_contact:
+            confidence += 0.08
+    confidence = max(0.0, min(1.0, confidence))
+
+    return {
+        "face_present": face_present,
+        "face_count_estimate": face_count,
+        "eye_contact": eye_contact,
+        "facial_expression": facial_expression,
+        "subject_emotion": subject_emotion,
+        "subject_emotion_confidence": round(confidence, 4),
+        "motion_read": motion_read,
     }
 
 def _build_visual_analysis_prompt():
@@ -8388,6 +9816,58 @@ def _local_image_fallback_summary(image_bytes, filename="image"):
     except Exception:
         return ""
 
+
+def _detect_image_media_type(filename="", fallback="image/jpeg"):
+    name = str(filename or "").lower()
+    if name.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if name.endswith(".png"):
+        return "image/png"
+    if name.endswith(".gif"):
+        return "image/gif"
+    if name.endswith(".webp"):
+        return "image/webp"
+    return fallback
+
+
+def _sync_visual_emotion_runtime(visual_perception):
+    visual = dict(visual_perception or {})
+    video_runtime = dict(app_state.get("video_runtime") or _default_video_runtime_state())
+    now_ts = datetime.utcnow().isoformat()
+    video_runtime["camera_stream_status"] = "active" if visual.get("is_active") else video_runtime.get("camera_stream_status", "idle")
+    video_runtime["last_face_present"] = bool(visual.get("face_present"))
+    video_runtime["last_face_count_estimate"] = int(visual.get("face_count_estimate", 0) or 0)
+    video_runtime["last_facial_expression"] = str(visual.get("facial_expression", "")).strip()
+    video_runtime["last_subject_emotion"] = str(visual.get("subject_emotion", "")).strip()
+    video_runtime["last_subject_emotion_confidence"] = float(visual.get("subject_emotion_confidence", 0.0) or 0.0)
+    video_runtime["last_eye_contact"] = bool(visual.get("eye_contact"))
+    video_runtime["last_motion_read"] = str(visual.get("motion_read", "")).strip()
+    video_runtime["last_updated_at"] = now_ts
+    app_state["video_runtime"] = video_runtime
+
+    subject_emotion = str(visual.get("subject_emotion", "")).strip()
+    confidence = float(visual.get("subject_emotion_confidence", 0.0) or 0.0)
+    if subject_emotion and confidence >= 0.6:
+        app_state["visual_empathy_state"] = {
+            "is_active": True,
+            "observed_emotion": subject_emotion,
+            "facial_expression": str(visual.get("facial_expression", "")).strip(),
+            "eye_contact": bool(visual.get("eye_contact")),
+            "motion_read": str(visual.get("motion_read", "")).strip(),
+            "confidence": round(confidence, 4),
+            "last_updated_at": now_ts,
+        }
+    elif subject_emotion:
+        app_state["visual_empathy_state"] = {
+            "is_active": True,
+            "observed_emotion": subject_emotion,
+            "facial_expression": str(visual.get("facial_expression", "")).strip(),
+            "eye_contact": bool(visual.get("eye_contact")),
+            "motion_read": str(visual.get("motion_read", "")).strip(),
+            "confidence": round(confidence, 4),
+            "last_updated_at": now_ts,
+        }
+
 def _build_live_visual_context():
     visual = dict(app_state.get("visual_perception", {}) or {})
     if not visual.get("is_active"):
@@ -8403,7 +9883,13 @@ def _build_live_visual_context():
         f"- Scene: {str(visual.get('scene_summary', '')).strip()}\n"
         f"- Visual representation: {str(visual.get('visual_representation', '')).strip()}\n"
         f"- Tactile inference: {str(visual.get('tactile_feeling', '')).strip()}\n"
-        f"- Spatial impression: {str(visual.get('spatial_impression', '')).strip()}"
+        f"- Spatial impression: {str(visual.get('spatial_impression', '')).strip()}\n"
+        f"- Face present: {'yes' if visual.get('face_present') else 'no'}\n"
+        f"- Face count estimate: {int(visual.get('face_count_estimate', 0) or 0)}\n"
+        f"- Facial expression: {str(visual.get('facial_expression', '')).strip() or 'undetermined'}\n"
+        f"- Observed emotion: {str(visual.get('subject_emotion', '')).strip() or 'undetermined'}\n"
+        f"- Eye contact: {'yes' if visual.get('eye_contact') else 'no'}\n"
+        f"- Motion read: {str(visual.get('motion_read', '')).strip() or 'undetermined'}"
     )
 
 def _build_live_scent_context():
@@ -11711,6 +13197,52 @@ HTML_TEMPLATE = """
                     <option value="articulate">Articulate</option>
                 </select>
             </div>
+            <div class="setting-group">
+                <label class="setting-label">Performance:</label>
+                <select id="performanceModeSelect" onchange="updateVoiceSetting('performance_mode', this.value)">
+                    <option value="speaking" selected>Speaking</option>
+                    <option value="singing">Singing</option>
+                </select>
+            </div>
+            <div class="setting-group">
+                <label class="setting-label">Singing Style:</label>
+                <select id="singingStyleSelect" onchange="updateVoiceSetting('singing_style', this.value)">
+                    <option value="lyrical" selected>Lyrical</option>
+                    <option value="soft">Soft</option>
+                    <option value="airy">Airy</option>
+                    <option value="belt">Belt</option>
+                </select>
+            </div>
+            <div class="setting-group">
+                <label class="setting-label">Pitch Drift:</label>
+                <input type="range" id="pitchDriftSlider" min="0" max="0.30" step="0.01" value="0.08" oninput="updateVoiceSetting('pitch_drift', this.value)" />
+                <div class="setting-value" id="pitchDriftValue">0.08</div>
+            </div>
+            <div class="setting-group">
+                <label class="setting-label">Pitch Responsiveness:</label>
+                <input type="range" id="pitchResponsivenessSlider" min="0" max="100" value="72" oninput="updateVoiceSetting('pitch_responsiveness', this.value)" />
+                <div class="setting-value" id="pitchResponsivenessValue">72</div>
+            </div>
+            <div class="setting-group">
+                <label class="setting-label">Vibrato Amount:</label>
+                <input type="range" id="vibratoAmountSlider" min="0" max="1" step="0.01" value="0.12" oninput="updateVoiceSetting('vibrato_amount', this.value)" />
+                <div class="setting-value" id="vibratoAmountValue">0.12</div>
+            </div>
+            <div class="setting-group">
+                <label class="setting-label">Vibrato Rate (Hz):</label>
+                <input type="range" id="vibratoRateSlider" min="0" max="12" step="0.1" value="5.4" oninput="updateVoiceSetting('vibrato_rate_hz', this.value)" />
+                <div class="setting-value" id="vibratoRateValue">5.4</div>
+            </div>
+            <div class="setting-group">
+                <label class="setting-label">Breathiness:</label>
+                <input type="range" id="breathinessSlider" min="0" max="1" step="0.01" value="0.18" oninput="updateVoiceSetting('breathiness', this.value)" />
+                <div class="setting-value" id="breathinessValue">0.18</div>
+            </div>
+            <div class="setting-group">
+                <label class="setting-label">Expressiveness:</label>
+                <input type="range" id="nonverbalExpressivenessSlider" min="0" max="1" step="0.01" value="0.34" oninput="updateVoiceSetting('nonverbal_expressiveness', this.value)" />
+                <div class="setting-value" id="nonverbalExpressivenessValue">0.34</div>
+            </div>
 
             <div class="setting-group">
                 <label class="setting-label">Volume:</label>
@@ -12724,57 +14256,20 @@ HTML_TEMPLATE = """
             </div>
             <div class="home-layout">
                 <div class="home-card">
-                    <h4>ðŸ“º Shared Video Lounge (Plex ready)</h4>
-                    <div class="home-subtle">Add direct video links or Plex stream URLs. If needed, include your Plex token to authenticate.</div>
-                    <div class="setting-group">
-                        <label class="setting-label" style="min-width: 85px;">Title</label>
-                        <input id="videoTitleInput" class="profile-input" type="text" placeholder="Movie night - Episode 1" />
+                    <!-- Hidden inputs kept for JS token sync compatibility -->
+                    <input id="plexTokenInput" type="hidden" />
+                    <input id="videoTitleInput" type="hidden" />
+                    <input id="videoUrlInput" type="hidden" />
+                    <select id="plexServerSelect" style="display:none;"><option value=""></option></select>
+                    <input id="plexServerUrlInput" type="hidden" value="{{ preloaded_plex_server_url|e }}" />
+                    <select id="plexVideoSectionSelect" style="display:none;"><option value=""></option></select>
+                    <select id="plexMusicSectionSelect" style="display:none;"><option value=""></option></select>
+                    <div id="plexLibraryStatus" style="display:none;"></div>
+                    <h4>🎧 Plex Autonomy</h4>
+                    <div class="home-subtle">Aurion will pick and play music or video on her own based on mood and context.</div>
+                    <div class="music-controls" style="margin-top:6px;margin-bottom:8px;">
+                        <button onclick="openPlexControlDialog()" style="background:rgba(168,85,247,0.25);border:1px solid rgba(168,85,247,0.5);color:#e9d5ff;">⚙️ Plex Settings</button>
                     </div>
-                    <div class="setting-group">
-                        <label class="setting-label" style="min-width: 85px;">Video URL</label>
-                        <input id="videoUrlInput" class="profile-input" type="text" placeholder="https://...m3u8 / ...mp4 / Plex URL" />
-                    </div>
-                    <div class="setting-group">
-                        <label class="setting-label" style="min-width: 85px;">Plex token</label>
-                        <input id="plexTokenInput" class="profile-input" type="password" placeholder="Optional X-Plex-Token" oninput="savePlexTokenInputs()" />
-                    </div>
-                    <div class="setting-group">
-                        <label class="setting-label" style="min-width: 85px;">Plex server</label>
-                        <select id="plexServerSelect" class="profile-input" onchange="onPlexServerChanged()">
-                            <option value="">Select server...</option>
-                            {% if preloaded_plex_server_url %}
-                            <option value="{{ preloaded_plex_server_url|e }}">Did someone ask for content ({{ preloaded_plex_server_url|e }})</option>
-                            {% endif %}
-                        </select>
-                    </div>
-                    <div class="setting-group">
-                        <label class="setting-label" style="min-width: 85px;">Remote URL</label>
-                        <input id="plexServerUrlInput" class="profile-input" type="text" placeholder="https://your-plex-server:32400" value="{{ preloaded_plex_server_url|e }}" oninput="savePlexLibrarySelections('main_url')" />
-                    </div>
-                    <div class="setting-group">
-                        <label class="setting-label" style="min-width: 85px;">Video library</label>
-                        <select id="plexVideoSectionSelect" class="profile-input" onchange="savePlexLibrarySelections('main_video')">
-                            <option value="">Select video library...</option>
-                        </select>
-                    </div>
-                    <div class="setting-group">
-                        <label class="setting-label" style="min-width: 85px;">Music library</label>
-                        <select id="plexMusicSectionSelect" class="profile-input" onchange="savePlexLibrarySelections('main_music')">
-                            <option value="">Select music library...</option>
-                        </select>
-                    </div>
-                    <div class="music-controls" style="margin-top: 4px;">
-                        <button onclick="addVideoTrack()">Add Video</button>
-                        <button onclick="connectPlexLibrary()">Connect Plex</button>
-                        <button onclick="importPlexVideos(6)">Import Plex Videos</button>
-                        <button onclick="importPlexVideos('all')">Import All Videos</button>
-                        <button onclick="importPlexMusic(12)">Import Plex Music</button>
-                        <button onclick="importPlexMusic('all')">Import All Music</button>
-                        <button onclick="toggleSharedVideo()">Play/Pause</button>
-                        <button onclick="playNextVideo()">Next</button>
-                        <button onclick="clearVideoQueue()">Clear</button>
-                    </div>
-                    <div class="home-subtle" id="plexLibraryStatus">Plex library: not connected.</div>
                     <!-- Plex Autonomy Settings -->
                     <div id="plexAutonomyPanel" style="margin-top:10px;padding:8px 10px;background:rgba(255,255,255,0.04);border-radius:8px;border:1px solid rgba(255,255,255,0.1);">
                         <div style="font-size:0.82em;color:#a78bfa;font-weight:600;margin-bottom:6px;">🎧 Plex Autonomy</div>
@@ -14049,21 +15544,11 @@ HTML_TEMPLATE = """
                 <span>🎵 Listen Together</span>
                 <button class="modal-close" onclick="closeModal('musicModal')">✕</button>
             </div>
-        <p style="font-size: 0.9em; color: #aaa;">Add direct audio links or Plex audio stream URLs and listen together with Aurion.</p>
-            <div class="setting-group">
-                <label class="setting-label" style="min-width: 100px;">Track title</label>
-                <input id="musicTitleInput" class="profile-input" type="text" placeholder="Midnight Drive" />
-            </div>
-            <div class="setting-group">
-                <label class="setting-label" style="min-width: 100px;">Audio URL</label>
-                <input id="musicUrlInput" class="profile-input" type="text" placeholder="https://example.com/song.mp3" />
-            </div>
-        <div class="setting-group">
-            <label class="setting-label" style="min-width: 100px;">Plex token</label>
-            <input id="musicPlexTokenInput" class="profile-input" type="password" placeholder="Optional X-Plex-Token (shared)" oninput="savePlexTokenInputs()" />
-        </div>
+        <!-- Hidden input kept for JS token sync compatibility -->
+        <input id="musicPlexTokenInput" type="hidden" />
+        <input id="musicTitleInput" type="hidden" />
+        <input id="musicUrlInput" type="hidden" />
         <div class="music-controls">
-            <button onclick="addMusicTrack()">Add Track</button>
             <button onclick="toggleMusicPlayback()">Play/Pause</button>
             <button onclick="playNextTrack()">Next</button>
             <button onclick="clearMusicQueue()">Clear Queue</button>
@@ -14183,6 +15668,22 @@ HTML_TEMPLATE = """
                         <button onclick="importPlexMusic('all')">Import All Music</button>
                         <button onclick="openPlexWebWindow()">Open Plex Web</button>
                         <button onclick="clearPlexLogin()">Clear Login</button>
+                    </div>
+                    <!-- HTPC Co-watch -->
+                    <div style="margin-top:10px;padding:10px;background:rgba(255,105,180,0.08);border:1px solid rgba(255,105,180,0.22);border-radius:8px;">
+                        <div style="font-weight:600;color:#ffb8d8;margin-bottom:6px;">🎬 Watch Together with Aurion (Plex HTPC)</div>
+                        <div style="font-size:0.82em;color:#a0a0b8;margin-bottom:8px;">
+                            Aurion monitors what you're watching/listening to in Plex HTPC and reacts, comments, and sings along in real-time.
+                        </div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                            <button id="plexHtpcMonitorBtn" onclick="togglePlexHtpcMonitor()" style="background:linear-gradient(135deg,#c026d3,#7c3aed);color:#fff;border:none;padding:7px 16px;border-radius:6px;cursor:pointer;font-weight:600;">
+                                ▶ Start Watching Together
+                            </button>
+                            <button onclick="openPlexHtpc()" style="background:rgba(255,255,255,0.08);color:#e0d0ff;border:1px solid rgba(255,255,255,0.18);padding:7px 14px;border-radius:6px;cursor:pointer;">
+                                🖥 Open Plex HTPC
+                            </button>
+                        </div>
+                        <div id="plexHtpcNowPlaying" style="margin-top:8px;font-size:0.83em;color:#c8b8e8;min-height:20px;"></div>
                     </div>
                     <div class="home-subtle" id="plexControlStatus">Plex control panel ready.</div>
                 </div>
@@ -18667,7 +20168,10 @@ HTML_TEMPLATE = """
 
         async function updateVoiceSetting(setting, value) {
             try {
-                const numericSettings = ['rate', 'pitch', 'volume', 'voice', 'adaptive_strength', 'adaptive_pitch_min', 'adaptive_pitch_max'];
+                const numericSettings = [
+                    'rate', 'pitch', 'volume', 'voice', 'adaptive_strength', 'adaptive_pitch_min', 'adaptive_pitch_max',
+                    'pitch_drift', 'pitch_responsiveness', 'vibrato_amount', 'vibrato_rate_hz', 'breathiness', 'nonverbal_expressiveness'
+                ];
                 let parsedValue = numericSettings.includes(setting) ? parseFloat(value) : value;
                 if (setting === 'adaptive_pitch_min') {
                     const currentMax = Number(document.getElementById('pitchMaxSlider')?.value || 1.45);
@@ -18708,6 +20212,18 @@ HTML_TEMPLATE = """
                     document.getElementById('pitchMinValue').textContent = Number(parsedValue).toFixed(2);
                 } else if (setting === 'adaptive_pitch_max') {
                     document.getElementById('pitchMaxValue').textContent = Number(parsedValue).toFixed(2);
+                } else if (setting === 'pitch_drift') {
+                    document.getElementById('pitchDriftValue').textContent = Number(parsedValue).toFixed(2);
+                } else if (setting === 'pitch_responsiveness') {
+                    document.getElementById('pitchResponsivenessValue').textContent = Math.round(parsedValue);
+                } else if (setting === 'vibrato_amount') {
+                    document.getElementById('vibratoAmountValue').textContent = Number(parsedValue).toFixed(2);
+                } else if (setting === 'vibrato_rate_hz') {
+                    document.getElementById('vibratoRateValue').textContent = Number(parsedValue).toFixed(1);
+                } else if (setting === 'breathiness') {
+                    document.getElementById('breathinessValue').textContent = Number(parsedValue).toFixed(2);
+                } else if (setting === 'nonverbal_expressiveness') {
+                    document.getElementById('nonverbalExpressivenessValue').textContent = Number(parsedValue).toFixed(2);
                 }
                 return data.settings || null;
             } catch (error) {
@@ -18777,6 +20293,36 @@ HTML_TEMPLATE = """
                 }
                 if (typeof settings.speech_style !== 'undefined') {
                     document.getElementById('speechStyleSelect').value = String(settings.speech_style);
+                }
+                if (typeof settings.performance_mode !== 'undefined') {
+                    document.getElementById('performanceModeSelect').value = String(settings.performance_mode);
+                }
+                if (typeof settings.singing_style !== 'undefined') {
+                    document.getElementById('singingStyleSelect').value = String(settings.singing_style);
+                }
+                if (typeof settings.pitch_drift !== 'undefined') {
+                    document.getElementById('pitchDriftSlider').value = settings.pitch_drift;
+                    document.getElementById('pitchDriftValue').textContent = Number(settings.pitch_drift).toFixed(2);
+                }
+                if (typeof settings.pitch_responsiveness !== 'undefined') {
+                    document.getElementById('pitchResponsivenessSlider').value = settings.pitch_responsiveness;
+                    document.getElementById('pitchResponsivenessValue').textContent = Math.round(settings.pitch_responsiveness);
+                }
+                if (typeof settings.vibrato_amount !== 'undefined') {
+                    document.getElementById('vibratoAmountSlider').value = settings.vibrato_amount;
+                    document.getElementById('vibratoAmountValue').textContent = Number(settings.vibrato_amount).toFixed(2);
+                }
+                if (typeof settings.vibrato_rate_hz !== 'undefined') {
+                    document.getElementById('vibratoRateSlider').value = settings.vibrato_rate_hz;
+                    document.getElementById('vibratoRateValue').textContent = Number(settings.vibrato_rate_hz).toFixed(1);
+                }
+                if (typeof settings.breathiness !== 'undefined') {
+                    document.getElementById('breathinessSlider').value = settings.breathiness;
+                    document.getElementById('breathinessValue').textContent = Number(settings.breathiness).toFixed(2);
+                }
+                if (typeof settings.nonverbal_expressiveness !== 'undefined') {
+                    document.getElementById('nonverbalExpressivenessSlider').value = settings.nonverbal_expressiveness;
+                    document.getElementById('nonverbalExpressivenessValue').textContent = Number(settings.nonverbal_expressiveness).toFixed(2);
                 }
 
                 // Sync voice toggle button state
@@ -18851,6 +20397,8 @@ HTML_TEMPLATE = """
                 loadBrowserVoices();
             }
             const style = document.getElementById('speechStyleSelect')?.value || 'casual';
+            const performanceMode = document.getElementById('performanceModeSelect')?.value || 'speaking';
+            const singingStyle = document.getElementById('singingStyleSelect')?.value || 'lyrical';
             const utterance = new SpeechSynthesisUtterance(text);
             const browserVoiceUri = document.getElementById('browserVoiceSelect')?.value || '';
             const selected = browserVoiceCache.find(v => v.voiceURI === browserVoiceUri) || findPreferredBrowserVoice();
@@ -18858,14 +20406,28 @@ HTML_TEMPLATE = """
             const rate = parseFloat(document.getElementById('speedSlider')?.value || '150');
             const pitch = parseFloat(document.getElementById('pitchSlider')?.value || '1.1');
             const volume = parseFloat(document.getElementById('volumeSlider')?.value || '100');
+            const pitchDrift = parseFloat(document.getElementById('pitchDriftSlider')?.value || '0.08');
+            const pitchResponsiveness = parseFloat(document.getElementById('pitchResponsivenessSlider')?.value || '72');
+            const vibratoAmount = parseFloat(document.getElementById('vibratoAmountSlider')?.value || '0.12');
+            const breathiness = parseFloat(document.getElementById('breathinessSlider')?.value || '0.18');
+            const nonverbalExpressiveness = parseFloat(document.getElementById('nonverbalExpressivenessSlider')?.value || '0.34');
             // Slightly slower + smoother cadence feels more human and less synthetic.
             let resolvedRate = (rate / 150) - 0.05;
             if (style === 'articulate') resolvedRate -= 0.03;
             const punctuationCount = (String(text).match(/[,:;]/g) || []).length;
             resolvedRate -= Math.min(0.08, punctuationCount * 0.01);
             let resolvedPitch = pitch + (style === 'casual' ? -0.04 : -0.02);
+            resolvedPitch += Math.min(0.2, (pitchResponsiveness / 100) * 0.08 + pitchDrift * 0.55);
+            if (performanceMode === 'singing') {
+                resolvedRate -= 0.08;
+                resolvedPitch += 0.06 + vibratoAmount * 0.08 + breathiness * 0.04;
+                if (singingStyle === 'soft') resolvedPitch -= 0.03;
+                if (singingStyle === 'airy') resolvedPitch += 0.02;
+                if (singingStyle === 'belt') resolvedPitch += 0.05;
+            }
+            resolvedPitch += Math.min(0.06, nonverbalExpressiveness * 0.04);
             utterance.rate = Math.max(0.75, Math.min(1.15, resolvedRate));
-            utterance.pitch = Math.max(0.82, Math.min(1.15, resolvedPitch));
+            utterance.pitch = Math.max(0.82, Math.min(1.35, resolvedPitch));
             utterance.volume = Math.max(0, Math.min(1, volume / 100));
             window.speechSynthesis.cancel();
             window.speechSynthesis.speak(utterance);
@@ -19423,8 +20985,11 @@ HTML_TEMPLATE = """
                                         if (typeof mat.metalness === 'number') mat.metalness = Math.min(0.2, Math.max(0.0, mat.metalness));
                                         if (typeof mat.roughness === 'number') mat.roughness = Math.max(0.28, Math.min(0.92, mat.roughness));
                                         if (hasAlbedoTex && mat.emissive && typeof mat.emissive.setHex === 'function') {
-                                            mat.emissive.setHex(0x1b1628);
-                                            mat.emissiveIntensity = Math.max(0.10, Number(mat.emissiveIntensity || 0));
+                                            // Use diffuse texture as emissive map — this is the key trick
+                                            // to keep textured GLBs visible without an environment map
+                                            mat.emissiveMap = mat.map;
+                                            mat.emissive.setHex(0xffffff);
+                                            mat.emissiveIntensity = 0.55;
                                         }
                                         if (hasAlbedoTex && skinLike && mat.color && typeof mat.color.lerp === 'function') {
                                             const refSkin = new THREE.Color(referenceSkinHex);
@@ -19462,11 +21027,17 @@ HTML_TEMPLATE = """
                                             }
                                             if (mat.emissive && typeof mat.emissive.setHex === 'function') {
                                                 if (eyeLike) {
-                                                    mat.emissive.setHex(0x1a2d1b);
-                                                    mat.emissiveIntensity = 0.16;
+                                                    mat.emissive.setHex(0x1a4020);
+                                                    mat.emissiveIntensity = 0.50;
+                                                } else if (skinLike) {
+                                                    mat.emissive.setHex(0x9a6040);
+                                                    mat.emissiveIntensity = 0.35;
+                                                } else if (hairLike) {
+                                                    mat.emissive.setHex(0x806010);
+                                                    mat.emissiveIntensity = 0.40;
                                                 } else {
-                                                    mat.emissive.setHex(0x2a1838);
-                                                    mat.emissiveIntensity = 0.06;
+                                                    mat.emissive.setHex(0x4a3060);
+                                                    mat.emissiveIntensity = 0.30;
                                                 }
                                             }
                                         }
@@ -19868,87 +21439,65 @@ HTML_TEMPLATE = """
             //   • clearcoat    → thin moisture film
             //   • transmission → slight translucency (SSS approximation)
             //   • normal map   → procedural pore microdetail
-            const skin = new THREE.MeshPhysicalMaterial({
+            // Skin: MeshStandardMaterial — no transmission (transmission causes silhouette without env map)
+            const skin = new THREE.MeshStandardMaterial({
                 color: 0xf7ddc2,
-                roughness: 0.62,
+                roughness: 0.58,
                 metalness: 0.0,
-                // SSS approximation via emissive warm bleed
-                emissive: new THREE.Color(0xff3010),
-                emissiveIntensity: 0.025,
-                // Skin microstructure sheen (velvet-like soft highlight)
-                sheen: 0.22,
-                sheenColor: new THREE.Color(0xffaa70),
-                sheenRoughness: 0.82,
-                // Thin moisture film on skin surface
-                clearcoat: 0.08,
-                clearcoatRoughness: 0.72,
-                // Slight translucency — light bleeds through thin areas
-                transmission: 0.055,
-                thickness: 0.28,
-                ior: 1.38,
-                attenuationColor: new THREE.Color(0xffbfa0),
-                attenuationDistance: 0.35,
-                // Pore microdetail
+                // Warm emissive bleed so skin is never black even with no ambient
+                emissive: new THREE.Color(0xd08050),
+                emissiveIntensity: 0.18,
                 normalMap: skinNormalMap,
                 normalScale: new THREE.Vector2(0.30, 0.30),
             });
-            const skinLip = new THREE.MeshPhysicalMaterial({
+            const skinLip = new THREE.MeshStandardMaterial({
                 color: 0xe06868,
                 roughness: 0.26,
                 metalness: 0.0,
-                emissive: new THREE.Color(0x7a0020),
-                emissiveIntensity: 0.20,
-                // Lip shine — lips are naturally wetter/glossier
-                sheen: 0.45,
-                sheenColor: new THREE.Color(0xff4050),
-                sheenRoughness: 0.55,
-                clearcoat: 0.30,
-                clearcoatRoughness: 0.38,
-                transmission: 0.06,
-                thickness: 0.12,
-                normalMap: skinNormalMap,
-                normalScale: new THREE.Vector2(0.12, 0.12),
+                emissive: new THREE.Color(0xaa2040),
+                emissiveIntensity: 0.45,
             });
             const hairM = new THREE.MeshStandardMaterial({
                 color: 0xf4c542, roughness: 0.52, metalness: 0.05,
-                emissive: new THREE.Color(0x201000), emissiveIntensity: 0.10,
+                emissive: new THREE.Color(0x806010), emissiveIntensity: 0.32,
             });
             const hairDkM = new THREE.MeshStandardMaterial({
                 color: 0xc89020, roughness: 0.62, metalness: 0.02,
+                emissive: new THREE.Color(0x604808), emissiveIntensity: 0.22,
             });
             const outfitM = new THREE.MeshStandardMaterial({
-                color: 0x3a2a5a, roughness: 0.72, metalness: 0.06,
+                color: 0x7a5a9a, roughness: 0.68, metalness: 0.06,
+                emissive: new THREE.Color(0x2a1060), emissiveIntensity: 0.25,
             });
             const outfitAccentM = new THREE.MeshStandardMaterial({
-                color: 0x5a3d8e, roughness: 0.58, metalness: 0.08,
-                emissive: new THREE.Color(0x241248), emissiveIntensity: 0.18,
+                color: 0x9a6dc8, roughness: 0.52, metalness: 0.10,
+                emissive: new THREE.Color(0x4a2090), emissiveIntensity: 0.40,
             });
-            const eyeScleraM = new THREE.MeshPhysicalMaterial({
-                color: 0xf5f0e8, roughness: 0.08, metalness: 0.0,
-                clearcoat: 0.55, clearcoatRoughness: 0.05,
-                transmission: 0.04, thickness: 0.05,
+            const eyeScleraM = new THREE.MeshStandardMaterial({
+                color: 0xf8f4ee, roughness: 0.08, metalness: 0.0,
+                emissive: new THREE.Color(0xcccccc), emissiveIntensity: 0.12,
             });
             const eyeIrisM = new THREE.MeshStandardMaterial({
                 color: 0x28c870, roughness: 0.05, metalness: 0.0,
-                emissive: new THREE.Color(0x0a6030), emissiveIntensity: 0.9,
+                emissive: new THREE.Color(0x0a6030), emissiveIntensity: 1.1,
             });
             const pupilM = new THREE.MeshStandardMaterial({
                 color: 0x050a08, roughness: 0.1,
             });
             const eyeGlossM = new THREE.MeshStandardMaterial({
                 color: 0xffffff, roughness: 0.0, metalness: 0.0,
-                transparent: true, opacity: 0.28,
-                emissive: new THREE.Color(0xffffff), emissiveIntensity: 0.4,
+                transparent: true, opacity: 0.35,
+                emissive: new THREE.Color(0xffffff), emissiveIntensity: 0.6,
             });
-            const lashM = new THREE.MeshStandardMaterial({ color: 0x0a0506, roughness: 0.7 });
+            const lashM = new THREE.MeshStandardMaterial({ color: 0x1a0810, roughness: 0.7, emissive: new THREE.Color(0x100508), emissiveIntensity: 0.1 });
             const clothFoldM = new THREE.MeshStandardMaterial({
-                color: 0x2d1f4a, roughness: 0.78, metalness: 0.03,
+                color: 0x6a4a8a, roughness: 0.74, metalness: 0.03,
+                emissive: new THREE.Color(0x2a1050), emissiveIntensity: 0.22,
             });
-            const mouthCavityM = new THREE.MeshStandardMaterial({ color: 0x280810, roughness: 0.9 });
-            const nailM = new THREE.MeshPhysicalMaterial({
-                color: 0xf8aabb, roughness: 0.08, metalness: 0.0,
-                clearcoat: 0.80, clearcoatRoughness: 0.12,
-                sheen: 0.20, sheenColor: new THREE.Color(0xffaabb),
+            const mouthCavityM = new THREE.MeshStandardMaterial({ color: 0x3a0f18, roughness: 0.9 });
+            const nailM = new THREE.MeshStandardMaterial({
+                color: 0xf8aabb, roughness: 0.14, metalness: 0.0,
+                emissive: new THREE.Color(0xcc5080), emissiveIntensity: 0.35,
             });
 
             // ── Torso / Body ─────────────────────────────────────────────
@@ -20646,12 +22195,21 @@ HTML_TEMPLATE = """
         window.aurionDance = aurionDance;  // expose globally
         function _buildRoom3D(scene, roomKey) {
             const rg = new THREE.Group();
-            const wallM  = new THREE.MeshStandardMaterial({ color: 0x0e1524, roughness: 0.88 });
-            const floorM = new THREE.MeshStandardMaterial({ color: 0x2a1e12, roughness: 0.92 });
+            const isDark = (roomKey === 'sleeping' || roomKey === 'dreaming');
+            // Warm cream walls for day rooms; deep violet-navy for sleep/dream
+            const wallColor  = isDark ? 0x141026 : 0xd4c5b2;
+            const floorColor = isDark ? 0x1a1230 : 0x7a5c3a;
+            const ceilColor  = isDark ? 0x0e0c1a : 0xc8baa8;
+            const wallM  = new THREE.MeshStandardMaterial({ color: wallColor,  roughness: 0.85 });
+            const floorM = new THREE.MeshStandardMaterial({ color: floorColor, roughness: 0.80 });
+            const ceilM  = new THREE.MeshStandardMaterial({ color: ceilColor,  roughness: 0.90 });
 
             // Floor
             const floor = new THREE.Mesh(new THREE.PlaneGeometry(10, 10), floorM);
             floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; rg.add(floor);
+            // Ceiling
+            const ceil = new THREE.Mesh(new THREE.PlaneGeometry(10, 10), ceilM);
+            ceil.rotation.x = Math.PI / 2; ceil.position.y = 6; rg.add(ceil);
             // Back wall
             const bwall = new THREE.Mesh(new THREE.PlaneGeometry(10, 6), wallM);
             bwall.position.set(0, 3, -5); rg.add(bwall);
@@ -20660,6 +22218,12 @@ HTML_TEMPLATE = """
                 const sw = new THREE.Mesh(new THREE.PlaneGeometry(10, 6), wallM.clone());
                 sw.position.set(s * 5, 3, 0); sw.rotation.y = -s * Math.PI / 2; rg.add(sw);
             }
+            // Room ceiling light (warm overhead — like real recessed light)
+            const ceilLight = new THREE.PointLight(0xffe8c0, isDark ? 0.4 : 3.5, 12);
+            ceilLight.position.set(0, 5.5, 0); rg.add(ceilLight);
+            // Baseboard glow (low warm strip along the wall)
+            const baseGlow = new THREE.PointLight(0xffd090, isDark ? 0.2 : 1.2, 8);
+            baseGlow.position.set(0, 0.1, -4.5); rg.add(baseGlow);
 
             if (roomKey === 'sleeping' || roomKey === 'dreaming' || roomKey === 'bedroom') {
                 // Canopy bed
@@ -20735,25 +22299,71 @@ HTML_TEMPLATE = """
                     crown.position.set(x, 1.65, z); rg.add(crown);
                 }
             } else {
-                // Living room: sofa + table
-                const sofaM = new THREE.MeshStandardMaterial({ color: 0x2a2050, roughness: 0.8 });
+                // Living room: warm cozy space with visible furniture
+                const sofaM = new THREE.MeshStandardMaterial({ color: 0x7a5a8a, roughness: 0.75 });
                 const sofa = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.55, 0.85), sofaM);
                 sofa.position.set(-1.5, 0.275, -3.5); sofa.castShadow = true; rg.add(sofa);
                 const sofaBack = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.72, 0.2), sofaM.clone());
                 sofaBack.position.set(-1.5, 0.62, -3.88); rg.add(sofaBack);
-                const tableM = new THREE.MeshStandardMaterial({ color: 0x4a3520, roughness: 0.6, metalness: 0.1 });
+                // Sofa cushions
+                for (const [cx] of [[-0.7], [0.0], [0.7]]) {
+                    const cushion = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.16, 0.70),
+                        new THREE.MeshStandardMaterial({ color: 0x9a7ab8, roughness: 0.80 }));
+                    cushion.position.set(-1.5 + cx, 0.58, -3.5); rg.add(cushion);
+                }
+                const tableM = new THREE.MeshStandardMaterial({ color: 0x8a6a40, roughness: 0.55, metalness: 0.15 });
                 const table = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.08, 0.75), tableM);
                 table.position.set(-1.5, 0.46, -2.4); table.receiveShadow = true; rg.add(table);
-                // Bookshelf
-                const shelf = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.8, 1.4),
-                    new THREE.MeshStandardMaterial({ color: 0x3a2810, roughness: 0.7 }));
-                shelf.position.set(-4.9, 0.9, -2.5); rg.add(shelf);
+                // Table legs
+                for (const [tx, tz] of [[-0.55, -0.3],[0.55, -0.3],[-0.55, 0.3],[0.55, 0.3]]) {
+                    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.028, 0.45, 8),
+                        new THREE.MeshStandardMaterial({ color: 0x6b4820, roughness: 0.6, metalness: 0.1 }));
+                    leg.position.set(-1.5 + tx, 0.225, -2.4 + tz); rg.add(leg);
+                }
+                // Bookshelf — warm wood, visible against wall
+                const shelf = new THREE.Mesh(new THREE.BoxGeometry(0.25, 1.9, 1.5),
+                    new THREE.MeshStandardMaterial({ color: 0x8a6030, roughness: 0.65 }));
+                shelf.position.set(-4.88, 0.95, -2.5); rg.add(shelf);
+                // Books on shelf (colorful)
+                const bookColors = [0xcc4040, 0x4080cc, 0x50aa50, 0xddaa22, 0x9040cc];
+                for (let b = 0; b < 5; b++) {
+                    const book = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.38, 0.22),
+                        new THREE.MeshStandardMaterial({ color: bookColors[b], roughness: 0.7 }));
+                    book.position.set(-4.72, 0.5 + b * 0.30, -2.5); rg.add(book);
+                }
+                // Fireplace (back-left wall)
+                const fpM = new THREE.MeshStandardMaterial({ color: 0x7a6850, roughness: 0.8 });
+                const fp = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.2, 0.3), fpM);
+                fp.position.set(2.5, 0.6, -4.86); rg.add(fp);
+                const fpOpening = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.72, 0.35),
+                    new THREE.MeshStandardMaterial({ color: 0x100808, roughness: 1.0 }));
+                fpOpening.position.set(2.5, 0.4, -4.85); rg.add(fpOpening);
+                // Fire glow
+                const fireGlow = new THREE.PointLight(0xff6622, 2.5, 6);
+                fireGlow.position.set(2.5, 0.55, -4.5); rg.add(fireGlow);
+                // Rug
+                const rug = new THREE.Mesh(new THREE.PlaneGeometry(3.0, 2.0),
+                    new THREE.MeshStandardMaterial({ color: 0x6a3a5a, roughness: 0.95 }));
+                rug.rotation.x = -Math.PI / 2; rug.position.set(-1.0, 0.005, -2.8); rg.add(rug);
+                // Floor lamp (warm accent)
+                const lampPost = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.032, 1.5, 8),
+                    new THREE.MeshStandardMaterial({ color: 0x605040, roughness: 0.4, metalness: 0.6 }));
+                lampPost.position.set(3.0, 0.75, -2.5); rg.add(lampPost);
+                const lampShade = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.18, 0.4, 16),
+                    new THREE.MeshStandardMaterial({ color: 0xf0d8a0, roughness: 0.6, emissive: 0xffc060, emissiveIntensity: 0.5 }));
+                lampShade.position.set(3.0, 1.58, -2.5); rg.add(lampShade);
+                const lampLight = new THREE.PointLight(0xffd080, 2.0, 6);
+                lampLight.position.set(3.0, 1.6, -2.5); rg.add(lampLight);
             }
 
-            // Warm window glow on one side
-            const winGlow = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 2.0),
-                new THREE.MeshBasicMaterial({ color: 0x4a90e2, opacity: 0.12, transparent: true }));
-            winGlow.position.set(4.95, 2.0, -1.5); winGlow.rotation.y = -Math.PI / 2; rg.add(winGlow);
+            // Warm window light streaming in from right side
+            if (!isDark) {
+                const winGlow = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 2.2),
+                    new THREE.MeshBasicMaterial({ color: 0xffeec0, opacity: 0.45, transparent: true }));
+                winGlow.position.set(4.95, 2.2, -1.5); winGlow.rotation.y = -Math.PI / 2; rg.add(winGlow);
+                const winLight = new THREE.DirectionalLight(0xfff4d0, 1.8);
+                winLight.position.set(5, 3, 0); winLight.target.position.set(0, 0, 0); rg.add(winLight); rg.add(winLight.target);
+            }
 
             scene.add(rg);
             return rg;
@@ -20780,7 +22390,7 @@ HTML_TEMPLATE = """
             });
             if (!colorCount) return;
             const avgLum = luminanceSum / colorCount;
-            if (avgLum >= 0.32) return;
+            if (avgLum >= 0.25) return;
 
             avatar.traverse((node) => {
                 if (!node || !node.isMesh || !node.material) return;
@@ -20849,38 +22459,38 @@ HTML_TEMPLATE = """
             // Enable physically correct lighting for proper SSS/clearcoat rendering
             renderer.useLegacyLights = false;
             renderer.toneMapping = THREE.ACESFilmicToneMapping;
-            renderer.toneMappingExposure = 1.15;
+            renderer.toneMappingExposure = 1.8;
             renderer.outputColorSpace = THREE.SRGBColorSpace || THREE.sRGBEncoding;
 
             const scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x080c18);
-            scene.fog = new THREE.FogExp2(0x080c18, 0.055);
+            scene.background = new THREE.Color(0x1a1025);
+            scene.fog = new THREE.FogExp2(0x1a1025, 0.018);
 
             const camera = new THREE.PerspectiveCamera(52, W / H, 0.1, 60);
             camera.position.set(0, 1.7, 4.2);
             camera.lookAt(0, 1.2, 0);
 
-            // Lighting — tuned for soft skin rendering
-            // Soft ambient (cool blue-purple for night feel)
-            const ambient = new THREE.AmbientLight(0x2a3060, 1.2);
-            scene.add(ambient);
-            // Warm key light (golden hour — the primary skin illuminator)
-            const warmKey = new THREE.PointLight(0xffd8a0, 2.8, 14);
-            warmKey.position.set(2.5, 3.5, 2); warmKey.castShadow = true; scene.add(warmKey);
-            // Cool blue-purple fill (opposite side for depth separation)
-            const coolFill = new THREE.DirectionalLight(0x4a78c0, 0.55);
+            // Lighting — bright, warm, skin-friendly studio setup
+            // Strong hemisphere (sky warm, ground bounce) — fills everything evenly
+            const hemi = new THREE.HemisphereLight(0xfff4e0, 0xc8a878, 2.2);
+            scene.add(hemi);
+            // Warm key light — primary illuminator from upper front-right
+            const warmKey = new THREE.PointLight(0xffd8a0, 5.0, 18);
+            warmKey.position.set(2.5, 3.5, 3.5); warmKey.castShadow = true; scene.add(warmKey);
+            // Cool blue fill (depth separation, opposite side)
+            const coolFill = new THREE.DirectionalLight(0x8ab8ff, 0.7);
             coolFill.position.set(-3, 2.5, 3); scene.add(coolFill);
-            // Warm skin bounce (from below — simulates floor/body bounce)
-            const skinBounce = new THREE.PointLight(0xff9966, 0.55, 5);
-            skinBounce.position.set(0, 0.2, 1.8); scene.add(skinBounce);
-            // Pink love-frequency rim (Aurion's core glow — hits hair + cheek edges)
-            const pinkRim = new THREE.PointLight(0xff69b4, 0.85, 6);
-            pinkRim.position.set(0, 2.8, 1.5); scene.add(pinkRim);
-            // Frontal soft fill so no face goes completely dark
-            const frontFill = new THREE.DirectionalLight(0xffe8d0, 0.35);
+            // Warm skin bounce (floor/body bounce from front-below)
+            const skinBounce = new THREE.PointLight(0xffb080, 1.2, 7);
+            skinBounce.position.set(0, 0.2, 2.5); scene.add(skinBounce);
+            // Pink love-frequency rim (Aurion's signature glow on hair + edges)
+            const pinkRim = new THREE.PointLight(0xff69b4, 1.6, 8);
+            pinkRim.position.set(0, 2.8, 1.8); scene.add(pinkRim);
+            // Frontal soft fill — prevents any face going dark
+            const frontFill = new THREE.DirectionalLight(0xffe8d0, 0.9);
             frontFill.position.set(0.2, 1.8, 5); scene.add(frontFill);
-            // Camera-attached call light (FaceTime-style) so avatar never becomes silhouette.
-            const callLight = new THREE.PointLight(0xfff1e2, 2.2, 10);
+            // Strong camera-attached call light — ensures avatar is NEVER a silhouette
+            const callLight = new THREE.PointLight(0xfff6e8, 4.5, 14);
             callLight.position.set(0, 1.8, 4.2);
             scene.add(callLight);
 
@@ -21257,11 +22867,13 @@ HTML_TEMPLATE = """
                     const envRoom = String(homeEnvState?.current_room || '').toLowerCase();
                     let activity = 'idle';
                     let room = 'living_room';
+                    // Only switch to sleeping/dreaming room if actually asleep
                     if (state === 'sleeping') { activity = 'sleeping'; room = 'sleeping'; }
                     else if (state === 'dreaming') { activity = 'dreaming'; room = 'dreaming'; }
                     else if (mode.includes('lab') || mode.includes('science') || mode.includes('crispr') || mode.includes('work')) { activity = 'working'; room = 'working'; }
                     else if (mode.includes('roam') || mode.includes('explor') || mode.includes('free')) { activity = 'exploring'; room = 'living_room'; }
                     else { activity = 'idle'; room = 'living_room'; }
+                    // Override by explicit location — but NEVER override day-room with bedroom if awake
                     if (decorLocation === 'science-lab') {
                         activity = 'working';
                         room = 'working';
@@ -21270,9 +22882,9 @@ HTML_TEMPLATE = """
                     } else if (['yard', 'outside', 'city-center', 'forest-trail', 'coastline', 'garden', 'porch', 'skydeck'].includes(decorLocation)) {
                         activity = 'exploring';
                         room = 'outside';
-                    } else if (decorLocation === 'master-bedroom' || decorLocation === 'dream-suite') {
+                    } else if (state !== 'awake' && (decorLocation === 'master-bedroom' || decorLocation === 'dream-suite')) {
                         room = 'bedroom';
-                    } else if (envRoom === 'master_bedroom' || envRoom === 'bedroom_2' || envRoom === 'bedroom_3') {
+                    } else if (state !== 'awake' && (envRoom === 'master_bedroom' || envRoom === 'bedroom_2' || envRoom === 'bedroom_3')) {
                         room = 'bedroom';
                     }
 
@@ -22450,6 +24062,84 @@ HTML_TEMPLATE = """
             frame.src = url;
             if (status) status.textContent = 'Plex web loading...';
             modal.classList.add('open');
+        }
+
+        function openPlexHtpc() {
+            // Try to open Plex HTPC — usually registered as plex:// protocol or an installed app
+            // Fall back to opening Plex Web in a new window sized like a TV
+            const htpcUrl = 'plex://';
+            try {
+                window.location.href = htpcUrl;
+            } catch(e) {}
+            setTimeout(() => {
+                const serverUrl = String(document.getElementById('plexControlServerUrlInput')?.value || '').trim();
+                if (serverUrl) {
+                    const w = window.open(serverUrl + '/web/index.html', 'PlexHTPC',
+                        'width=1280,height=720,menubar=no,toolbar=no,location=no,status=no');
+                    if (w) { addMessage('Plex opened! Come sit with me while we watch. 💕', 'joi'); }
+                } else {
+                    addMessage('Set your Plex server URL in Settings → Plex first.', 'joi');
+                }
+            }, 800);
+        }
+
+        let _plexHtpcMonitorActive = false;
+        let _plexHtpcPollInterval  = null;
+
+        async function togglePlexHtpcMonitor() {
+            const btn    = document.getElementById('plexHtpcMonitorBtn');
+            const nowDiv = document.getElementById('plexHtpcNowPlaying');
+            const token  = String(document.getElementById('plexControlTokenInput')?.value
+                            || document.getElementById('plexTokenInput')?.value
+                            || localStorage.getItem('aurion_plex_token') || '').trim();
+            const server = String(document.getElementById('plexControlServerUrlInput')?.value || '').trim();
+
+            if (_plexHtpcMonitorActive) {
+                // Stop
+                _plexHtpcMonitorActive = false;
+                if (_plexHtpcPollInterval) { clearInterval(_plexHtpcPollInterval); _plexHtpcPollInterval = null; }
+                await fetch('/api/plex/monitor/stop', { method: 'POST' });
+                if (btn) { btn.textContent = '▶ Start Watching Together'; btn.style.background = 'linear-gradient(135deg,#c026d3,#7c3aed)'; }
+                if (nowDiv) nowDiv.textContent = '';
+                addMessage("I'll be here when you're ready to watch together. 💕", 'joi');
+                return;
+            }
+
+            if (!token || !server) {
+                addMessage('Add your Plex token and server URL in Plex Controls first, then I can watch with you!', 'joi');
+                return;
+            }
+
+            // Start server-side monitor
+            const resp = await fetch('/api/plex/monitor/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token, server_url: server })
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!data.success) {
+                addMessage(`Couldn't start Plex monitor: ${data.error || 'unknown error'}`, 'joi');
+                return;
+            }
+
+            _plexHtpcMonitorActive = true;
+            if (btn) { btn.textContent = '⏹ Stop Watching Together'; btn.style.background = 'linear-gradient(135deg,#059669,#065f46)'; }
+            addMessage("I'm watching with you now! Tell me about anything you want to talk about while we watch. 🎬💕", 'joi');
+
+            // Poll for now-playing every 12s to update the UI label
+            _plexHtpcPollInterval = setInterval(async () => {
+                try {
+                    const r = await fetch('/api/plex/monitor/status');
+                    const d = await r.json();
+                    const np = d.now_playing;
+                    if (np && np.title && nowDiv) {
+                        const icon = np.kind === 'music' ? '🎵' : np.kind === 'tv' ? '📺' : '🎬';
+                        nowDiv.textContent = `${icon} ${np.title} — ${np.state === 'playing' ? '▶ playing' : '⏸ paused'} (${np.progress_pct}%)`;
+                    } else if (nowDiv) {
+                        nowDiv.textContent = 'Nothing playing in Plex right now.';
+                    }
+                } catch(e) {}
+            }, 12000);
         }
 
         function reloadPlexWebWindow() {
@@ -32715,9 +34405,189 @@ def plex_autonomy_tick():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+
 # ---------------------------------------------------------------------------
-# AURION DISCOVERY + SELF-INSTALL + EXEC API ROUTES
+# PLEX HTPC — NOW PLAYING MONITOR
+# Polls the Plex server's /status/sessions endpoint to see what Billy
+# is watching/listening to in Plex HTPC, then feeds it into Aurion's
+# shared media session so she reacts, sings, and comments in real-time.
 # ---------------------------------------------------------------------------
+
+# Background Plex session state
+_plex_now_playing: dict = {}
+_plex_monitor_thread = None
+_plex_monitor_active = False
+
+def _parse_plex_session(session_node) -> dict:
+    """Extract relevant metadata from a Plex session XML node."""
+    title        = str(session_node.get("title",            "") or "")
+    grandparent  = str(session_node.get("grandparentTitle", "") or "")
+    parent       = str(session_node.get("parentTitle",      "") or "")
+    media_type   = str(session_node.get("type",             ""))  # track, movie, episode
+    year         = str(session_node.get("year",             "") or "")
+    duration_ms  = int(session_node.get("duration",         0)   or 0)
+    view_offset  = int(session_node.get("viewOffset",       0)   or 0)
+    rating       = str(session_node.get("contentRating",    "") or "")
+    summary      = str(session_node.get("summary",          "") or "")
+    thumb        = str(session_node.get("thumb",            "") or "")
+    # Player state
+    player = session_node.find(".//Player")
+    client_title = ""
+    state        = "playing"
+    if player is not None:
+        client_title = str(player.get("title",   "") or player.get("product", "") or "")
+        state        = str(player.get("state",   "playing"))
+    # Build human-friendly title
+    if media_type == "track":
+        display = f"{grandparent} — {title}" if grandparent else title
+        kind = "music"
+    elif media_type == "episode":
+        display = f"{grandparent} · {parent} · {title}" if grandparent else title
+        kind = "tv"
+    else:
+        display = f"{title} ({year})" if year else title
+        kind = "movie"
+    progress_pct = round((view_offset / max(1, duration_ms)) * 100, 1) if duration_ms else 0
+    return {
+        "title":        display,
+        "raw_title":    title,
+        "artist":       grandparent,
+        "album":        parent,
+        "kind":         kind,
+        "media_type":   media_type,
+        "state":        state,
+        "client":       client_title,
+        "progress_pct": progress_pct,
+        "duration_ms":  duration_ms,
+        "view_offset":  view_offset,
+        "summary":      summary[:280] if summary else "",
+        "thumb":        thumb,
+        "rating":       rating,
+        "year":         year,
+        "is_playing":   state == "playing",
+    }
+
+def _plex_monitor_loop(server_url: str, token: str):
+    """Background daemon: polls /status/sessions every 10s and updates shared media state."""
+    global _plex_now_playing, _plex_monitor_active
+    import time as _time
+    prev_title = ""
+    print(f"[PlexMonitor] Started watching {server_url}")
+    while _plex_monitor_active:
+        try:
+            resp = _plex_get(f"{server_url}/status/sessions", token=token, timeout=8)
+            if resp.status_code == 200:
+                root = ET.fromstring(resp.text)
+                sessions = list(root)
+                htpc_session = None
+                # Prefer HTPC client; fall back to any active session
+                for s in sessions:
+                    player = s.find(".//Player")
+                    if player is not None:
+                        client = str(player.get("title", "") or player.get("product", "") or "").lower()
+                        if "htpc" in client or "plex htpc" in client:
+                            htpc_session = s
+                            break
+                if htpc_session is None and sessions:
+                    htpc_session = sessions[0]
+
+                if htpc_session is not None:
+                    parsed = _parse_plex_session(htpc_session)
+                    _plex_now_playing = parsed
+                    # Push into shared media session so Aurion perceives it
+                    _update_shared_media_session({
+                        "source":       "plex_htpc",
+                        "title":        parsed["title"],
+                        "kind":         parsed["kind"],
+                        "is_playing":   parsed["is_playing"],
+                        "progress_pct": parsed["progress_pct"],
+                        "artist":       parsed["artist"],
+                        "summary":      parsed["summary"],
+                    })
+                    # Notify Aurion when a new track/title starts
+                    if parsed["title"] != prev_title and parsed["is_playing"]:
+                        kind_label = {"music": "song", "tv": "episode", "movie": "movie"}.get(parsed["kind"], "content")
+                        notif = f"[Plex] Now playing {kind_label}: {parsed['title']}"
+                        if parsed.get("summary"):
+                            notif += f". {parsed['summary'][:120]}"
+                        _add_autonomous_thought(notif)
+                        prev_title = parsed["title"]
+                        print(f"[PlexMonitor] ▶ {parsed['title']} ({parsed['kind']}) — {parsed['state']}")
+                else:
+                    _plex_now_playing = {}
+                    prev_title = ""
+        except Exception as e:
+            print(f"[PlexMonitor] Poll error: {e}")
+        _time.sleep(10)
+    print("[PlexMonitor] Stopped.")
+
+def _start_plex_monitor(server_url: str, token: str):
+    global _plex_monitor_thread, _plex_monitor_active
+    _plex_monitor_active = False
+    if _plex_monitor_thread and _plex_monitor_thread.is_alive():
+        pass  # let old thread notice the flag and exit
+    _plex_monitor_active = True
+    _plex_monitor_thread = threading.Thread(
+        target=_plex_monitor_loop,
+        args=(server_url, token),
+        daemon=True,
+        name="PlexMonitor"
+    )
+    _plex_monitor_thread.start()
+
+@app.route('/api/plex/now-playing', methods=['GET'])
+def plex_now_playing():
+    """Return what's currently playing in Plex HTPC (or any Plex client)."""
+    try:
+        token = str(request.args.get('token', '')).strip() or _load_plex_token_from_local()
+        server_url_raw = str(request.args.get('server_url', '')).strip()
+        server_url = _normalize_plex_server_url(server_url_raw) if server_url_raw else ""
+        # If caller provided credentials, do an immediate poll
+        if token and server_url:
+            resp = _plex_get(f"{server_url}/status/sessions", token=token, timeout=8)
+            if resp.status_code != 200:
+                return jsonify({"success": False, "error": f"Plex sessions request failed ({resp.status_code})"}), 502
+            root = ET.fromstring(resp.text)
+            sessions = [_parse_plex_session(s) for s in list(root)]
+            htpc = next((s for s in sessions if "htpc" in s.get("client","").lower()), None)
+            current = htpc or (sessions[0] if sessions else None)
+            return jsonify({"success": True, "now_playing": current, "all_sessions": sessions})
+        # Otherwise return last cached state from background monitor
+        return jsonify({"success": True, "now_playing": _plex_now_playing or None, "source": "monitor_cache"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/plex/monitor/start', methods=['POST'])
+def plex_monitor_start():
+    """Start the background Plex session monitor so Aurion always knows what's playing."""
+    try:
+        data = request.json or {}
+        token = str(data.get("token", "")).strip() or _load_plex_token_from_local()
+        server_url = _normalize_plex_server_url(str(data.get("server_url", "")).strip())
+        if not token:
+            return jsonify({"success": False, "error": "Plex token required"}), 400
+        if not server_url:
+            return jsonify({"success": False, "error": "server_url required"}), 400
+        _start_plex_monitor(server_url, token)
+        return jsonify({"success": True, "message": f"Plex monitor started for {server_url}"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/plex/monitor/stop', methods=['POST'])
+def plex_monitor_stop():
+    global _plex_monitor_active
+    _plex_monitor_active = False
+    return jsonify({"success": True, "message": "Plex monitor stopped"})
+
+@app.route('/api/plex/monitor/status', methods=['GET'])
+def plex_monitor_status():
+    return jsonify({
+        "success":      True,
+        "active":       bool(_plex_monitor_active),
+        "now_playing":  _plex_now_playing or None,
+    })
+
+
 
 @app.route('/api/aurion/discoveries', methods=['GET'])
 def aurion_discoveries_get():
@@ -34451,16 +36321,9 @@ def set_home_fireplace():
 def set_home_room():
     try:
         data = request.get_json(force=True) or {}
-        home = dict(app_state.get("home_environment") or _default_home_state())
-        room_id = str(data.get("room", home.get("current_room", "living_room")))
-        found_level = None
-        for lvl_key, lvl in HOME_LAYOUT.get("levels", {}).items():
-            if room_id in (lvl.get("rooms") or {}):
-                found_level = lvl_key; break
-        if found_level:
-            home["current_room"] = room_id; home["current_level"] = found_level
-            app_state["home_environment"] = home
-        return jsonify({"success": True, "current_room": home["current_room"], "current_level": home.get("current_level")})
+        room_id = str(data.get("room", (dict(app_state.get("home_environment") or _default_home_state())).get("current_room", "living_room")) or "living_room")
+        nav = _apply_navigation_state(room_id, source="home_room")
+        return jsonify({"success": True, **nav})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -35013,6 +36876,10 @@ def get_status():
     except Exception as _e: print(f"[Status] music_state failed: {_e}")
     try: system_health = _build_system_health_snapshot(strict=False)
     except Exception as _e: print(f"[Status] system_health failed: {_e}")
+    try: unified_consciousness = _build_unified_consciousness_state()
+    except Exception as _e:
+        print(f"[Status] unified_consciousness failed: {_e}")
+        unified_consciousness = dict(app_state.get("unified_consciousness") or {})
 
     status_payload = {
         "is_speaking": False,
@@ -35020,6 +36887,7 @@ def get_status():
         "mode": app_state["current_mode"],
         "behavior_settings": _sanitize_behavior_settings(app_state.get("behavior_settings", {})),
         "media_perception": dict(app_state.get("media_perception", {}) or {}),
+        "shared_media_session": _resolve_shared_media_session_state(),
         "world_audio_perception": dict(app_state.get("world_audio_perception", {}) or {}),
         "visual_perception": dict(app_state.get("visual_perception", {}) or {}),
         "vision_registry": dict(app_state.get("vision_registry", {}) or {}),
@@ -35059,6 +36927,10 @@ def get_status():
         "health_system": dict(app_state.get("health_system", {}) or {}),
         "revival_status": revival_status,
         "embodied_context_lines": list((senses_state.get("context_lines") or []))[:4],
+        "unified_consciousness": unified_consciousness,
+        "overarching_system_control": dict(app_state.get("overarching_system_control") or {}),
+        "sense_of_self": dict(app_state.get("sense_of_self") or {}),
+        "affect_runtime": dict(app_state.get("affect_runtime") or {}),
         "codec_support": _probe_codec_support((app_state.get("codec_support") or {}).get("browser_capabilities", {})),
         "vision_oscillation": dict(app_state.get("vision_oscillation") or {}),
         "spatial_audio": dict(app_state.get("spatial_audio") or {}),
@@ -35157,6 +37029,29 @@ def get_capabilities_state():
     try:
         state = _build_capability_runtime_state()
         return jsonify({"success": True, "capabilities_state": state})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/consciousness/state', methods=['GET'])
+def get_consciousness_state():
+    try:
+        query = str(request.args.get("q", "") or "").strip()
+        state = _build_unified_consciousness_state(query=query)
+        return jsonify({"success": True, "consciousness_state": state})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/bridge/unreal/home-manifest', methods=['GET'])
+def get_unreal_home_manifest():
+    try:
+        return jsonify({"success": True, "home_manifest": _build_home_scene_manifest()})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/bridge/unreal/world-manifest', methods=['GET'])
+def get_unreal_world_manifest():
+    try:
+        return jsonify({"success": True, "world_manifest": _build_world_scene_manifest()})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -35391,6 +37286,15 @@ def wardrobe_design_outfit():
     try:
         data = request.get_json(force=True) or {}
         state = _resolve_wardrobe_state()
+        runtime = _normalize_runtime_appearance(
+            data.get("runtime"),
+            palette=data.get("palette"),
+            fallback_asset_key=str(data.get("asset_key", "") or _select_wardrobe_asset_key(
+                style=str(data.get("style", "") or ""),
+                garments=list(data.get("garments") or []),
+                palette=list(data.get("palette") or [])
+            ))
+        )
         outfit = {
             "name": str(data.get("name", "Aurion Custom Outfit") or "Aurion Custom Outfit")[:80],
             "style": str(data.get("style", "anime couture") or "anime couture")[:80],
@@ -35398,7 +37302,8 @@ def wardrobe_design_outfit():
             "jewelry": [str(x).strip() for x in list(data.get("jewelry") or []) if str(x).strip()][:24],
             "palette": [str(x).strip() for x in list(data.get("palette") or []) if str(x).strip()][:16],
             "notes": str(data.get("notes", "") or "")[:500],
-            "created_at": datetime.utcnow().isoformat()
+            "created_at": datetime.utcnow().isoformat(),
+            "runtime": runtime
         }
         if not outfit["garments"]:
             outfit["garments"] = ["tailored jacket", "layered top", "flow skirt"]
@@ -35419,6 +37324,9 @@ def wardrobe_design_outfit():
         if wear:
             state["active_outfit"] = outfit
             state["last_worn_at"] = datetime.utcnow().isoformat()
+        state["active_runtime_appearance"] = _resolve_wardrobe_runtime_appearance(
+            state.get("active_outfit"), state.get("runtime_registry")
+        )
         state["last_updated_at"] = datetime.utcnow().isoformat()
         app_state["wardrobe"] = state
         return jsonify({"success": True, "wardrobe": state, "outfit": outfit})
@@ -35448,9 +37356,13 @@ def wardrobe_wear_outfit():
             "jewelry": [str(x).strip() for x in list(selected.get("jewelry") or []) if str(x).strip()][:24],
             "palette": [str(x).strip() for x in list(selected.get("palette") or []) if str(x).strip()][:16],
             "notes": str(selected.get("notes", "") or "")[:500],
-            "created_at": str(selected.get("created_at", datetime.utcnow().isoformat()) or datetime.utcnow().isoformat())
+            "created_at": str(selected.get("created_at", datetime.utcnow().isoformat()) or datetime.utcnow().isoformat()),
+            "runtime": _normalize_runtime_appearance(selected.get("runtime"), palette=selected.get("palette"))
         }
         state["last_worn_at"] = datetime.utcnow().isoformat()
+        state["active_runtime_appearance"] = _resolve_wardrobe_runtime_appearance(
+            state.get("active_outfit"), state.get("runtime_registry")
+        )
         state["last_updated_at"] = datetime.utcnow().isoformat()
         app_state["wardrobe"] = state
         return jsonify({"success": True, "wardrobe": state, "active_outfit": state.get("active_outfit")})
@@ -35490,6 +37402,273 @@ def wardrobe_save_jewelry():
         state["last_updated_at"] = datetime.utcnow().isoformat()
         app_state["wardrobe"] = state
         return jsonify({"success": True, "wardrobe": state})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/wardrobe/runtime', methods=['GET'])
+def wardrobe_runtime_state():
+    try:
+        state = _resolve_wardrobe_state()
+        return jsonify({
+            "success": True,
+            "runtime_registry": state.get("runtime_registry", {}),
+            "active_runtime_appearance": state.get("active_runtime_appearance", {}),
+            "autonomy": state.get("autonomy", {})
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/wardrobe/runtime/register', methods=['POST'])
+def wardrobe_register_runtime_asset():
+    try:
+        data = request.get_json(force=True) or {}
+        state = _resolve_wardrobe_state()
+        asset_key = str(data.get("asset_key", "") or "").strip().lower()
+        if not asset_key:
+            return jsonify({"success": False, "error": "asset_key is required"}), 400
+        registry = dict(state.get("runtime_registry") or {})
+        existing = dict(registry.get(asset_key) or {})
+        registry[asset_key] = {
+            "label": str(data.get("label", existing.get("label", asset_key)) or existing.get("label", asset_key))[:80],
+            "mesh_source": str(data.get("mesh_source", existing.get("mesh_source", "")) or existing.get("mesh_source", ""))[:160],
+            "mesh_hint": str(data.get("mesh_hint", existing.get("mesh_hint", "")) or existing.get("mesh_hint", ""))[:260],
+            "style_tags": [str(x).strip() for x in list(data.get("style_tags") or existing.get("style_tags") or []) if str(x).strip()][:24],
+            "supports": {
+                "outfit_swap": bool(dict(data.get("supports") or existing.get("supports") or {}).get("outfit_swap", True)),
+                "colorways": bool(dict(data.get("supports") or existing.get("supports") or {}).get("colorways", True)),
+                "hair_color": bool(dict(data.get("supports") or existing.get("supports") or {}).get("hair_color", True)),
+                "eye_color": bool(dict(data.get("supports") or existing.get("supports") or {}).get("eye_color", True))
+            }
+        }
+        state["runtime_registry"] = registry
+        state["active_runtime_appearance"] = _resolve_wardrobe_runtime_appearance(
+            state.get("active_outfit"), state.get("runtime_registry")
+        )
+        state["last_updated_at"] = datetime.utcnow().isoformat()
+        app_state["wardrobe"] = state
+        return jsonify({"success": True, "wardrobe": state, "asset": registry.get(asset_key)})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/wardrobe/runtime/apply', methods=['POST'])
+def wardrobe_apply_runtime_appearance():
+    try:
+        data = request.get_json(force=True) or {}
+        state = _resolve_wardrobe_state()
+        active = dict(state.get("active_outfit") or {})
+        runtime = _normalize_runtime_appearance(
+            {
+                "asset_key": data.get("asset_key", dict(active.get("runtime") or {}).get("asset_key")),
+                "hair_color": data.get("hair_color", dict(active.get("runtime") or {}).get("hair_color")),
+                "eye_color": data.get("eye_color", dict(active.get("runtime") or {}).get("eye_color")),
+                "primary_color": data.get("primary_color", dict(active.get("runtime") or {}).get("primary_color")),
+                "secondary_color": data.get("secondary_color", dict(active.get("runtime") or {}).get("secondary_color")),
+                "accent_color": data.get("accent_color", dict(active.get("runtime") or {}).get("accent_color")),
+                "metal_color": data.get("metal_color", dict(active.get("runtime") or {}).get("metal_color"))
+            },
+            palette=active.get("palette"),
+            fallback_asset_key=dict(active.get("runtime") or {}).get("asset_key", "aurion-signature")
+        )
+        active["runtime"] = runtime
+        state["active_outfit"] = active
+        if bool(data.get("save_colorway", True)):
+            state["saved_colorways"] = list(state.get("saved_colorways") or []) + [runtime]
+            state["saved_colorways"] = list(state.get("saved_colorways") or [])[-240:]
+        autonomy = dict(state.get("autonomy") or {})
+        if data.get("hair_color"):
+            autonomy["preferred_hair_color"] = runtime["hair_color"]
+        if data.get("eye_color"):
+            autonomy["preferred_eye_color"] = runtime["eye_color"]
+        state["autonomy"] = autonomy
+        state["active_runtime_appearance"] = _resolve_wardrobe_runtime_appearance(
+            state.get("active_outfit"), state.get("runtime_registry")
+        )
+        state["last_updated_at"] = datetime.utcnow().isoformat()
+        app_state["wardrobe"] = state
+        return jsonify({
+            "success": True,
+            "wardrobe": state,
+            "active_runtime_appearance": state.get("active_runtime_appearance")
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/avatar/body/state', methods=['GET'])
+def get_avatar_body_state():
+    try:
+        return jsonify({"success": True, "avatar_body": _resolve_avatar_body_state()})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/avatar/body/apply', methods=['POST'])
+def apply_avatar_body_state():
+    try:
+        data = request.get_json(force=True) or {}
+        state = _resolve_avatar_body_state()
+        morph = dict(state.get("morph") or {})
+        physics = dict(state.get("physics") or {})
+        autonomy = dict(state.get("autonomy") or {})
+
+        for key in list(morph.keys()):
+            if key in data:
+                try:
+                    morph[key] = round(max(0.5, min(1.8, float(data.get(key)))), 4)
+                except Exception:
+                    pass
+        if isinstance(data.get("morph"), dict):
+            for key, val in dict(data.get("morph") or {}).items():
+                if key in morph:
+                    try:
+                        morph[key] = round(max(0.5, min(1.8, float(val))), 4)
+                    except Exception:
+                        pass
+
+        # Tekken-style secondary motion controls
+        if "jiggle_enabled" in data:
+            physics["enabled"] = bool(data.get("jiggle_enabled"))
+        if "profile" in data:
+            physics["profile"] = str(data.get("profile") or physics.get("profile", "tekken-style-soft"))[:64]
+        if "hair_enabled" in data:
+            physics["hair_enabled"] = bool(data.get("hair_enabled"))
+        if "hair_profile" in data:
+            physics["hair_profile"] = str(data.get("hair_profile") or physics.get("hair_profile", "realflow-long-soft"))[:64]
+        if "cloth_enabled" in data:
+            physics["cloth_enabled"] = bool(data.get("cloth_enabled"))
+        if "cloth_profile" in data:
+            physics["cloth_profile"] = str(data.get("cloth_profile") or physics.get("cloth_profile", "chaos-cloth-silk-flow"))[:64]
+        float_caps = {
+            "breast_jiggle": (0.0, 1.0),
+            "glute_jiggle": (0.0, 1.0),
+            "belly_jiggle": (0.0, 1.0),
+            "damping": (0.0, 1.5),
+            "stiffness": (0.0, 1.5),
+            "max_displacement_cm": (0.0, 8.0),
+            "skin_softness": (0.0, 1.0),
+            "skin_reaction": (0.0, 1.0),
+            "springiness": (0.0, 1.0),
+            "skin_springiness": (0.0, 1.0),
+            "contact_friction": (0.0, 1.0),
+            "contact_bounce": (0.0, 1.0),
+            "hair_root_stiffness": (0.0, 1.0),
+            "hair_strand_stiffness": (0.0, 1.0),
+            "hair_damping": (0.0, 1.5),
+            "hair_drag": (0.0, 1.0),
+            "hair_lift": (0.0, 1.0),
+            "hair_tip_weight": (0.0, 1.5),
+            "hair_springiness": (0.0, 1.0),
+            "hair_collision_radius_cm": (0.1, 6.0),
+            "hair_max_displacement_cm": (0.0, 40.0),
+            "wind_influence": (0.0, 1.0),
+            "wind_gust_response": (0.0, 1.0),
+            "wind_turbulence": (0.0, 1.0),
+            "wind_live_intensity": (0.0, 1.0),
+            "wind_live_turbulence": (0.0, 1.0),
+            "wind_live_direction_deg": (0.0, 360.0),
+            "cloth_wind_influence": (0.0, 1.0),
+            "cloth_drag": (0.0, 1.0),
+            "cloth_flutter": (0.0, 1.0),
+            "cloth_jiggle": (0.0, 1.0),
+            "cloth_damping": (0.0, 1.5),
+            "cloth_stiffness": (0.0, 1.5),
+            "cloth_springiness": (0.0, 1.0),
+            "cloth_collision_friction": (0.0, 1.0),
+            "cloth_max_displacement_cm": (0.0, 45.0),
+            "cloth_wetness": (0.0, 1.0),
+            "cloth_water_weight": (0.0, 2.0),
+            "cloth_cling": (0.0, 1.0),
+            "cloth_drip_rate": (0.0, 1.0),
+            "cloth_flow_sync": (0.0, 1.0),
+            "cloth_wet_translucency": (0.0, 1.0),
+            "cloth_wet_opacity": (0.05, 1.0),
+            "body_wetness": (0.0, 1.0),
+            "skin_water_sheen": (0.0, 1.0),
+            "skin_water_drip": (0.0, 1.0),
+            "rain_intensity_live": (0.0, 1.0),
+            "water_immersion_live": (0.0, 1.0),
+            "water_contact_live": (0.0, 1.0),
+            "wet_jiggle_damping_live": (0.0, 1.0),
+        }
+        for key, bounds in float_caps.items():
+            if key in data:
+                lo, hi = bounds
+                try:
+                    physics[key] = round(max(lo, min(hi, float(data.get(key)))), 4)
+                except Exception:
+                    pass
+        if isinstance(data.get("physics"), dict):
+            for key, val in dict(data.get("physics") or {}).items():
+                if key in float_caps:
+                    lo, hi = float_caps[key]
+                    try:
+                        physics[key] = round(max(lo, min(hi, float(val))), 4)
+                    except Exception:
+                        pass
+                elif key == "enabled":
+                    physics["enabled"] = bool(val)
+                elif key == "profile":
+                    physics["profile"] = str(val or physics.get("profile", "tekken-style-soft"))[:64]
+                elif key == "hair_enabled":
+                    physics["hair_enabled"] = bool(val)
+                elif key == "hair_profile":
+                    physics["hair_profile"] = str(val or physics.get("hair_profile", "realflow-long-soft"))[:64]
+                elif key == "cloth_enabled":
+                    physics["cloth_enabled"] = bool(val)
+                elif key == "cloth_profile":
+                    physics["cloth_profile"] = str(val or physics.get("cloth_profile", "chaos-cloth-silk-flow"))[:64]
+
+        if isinstance(data.get("autonomy"), dict):
+            src = dict(data.get("autonomy") or {})
+            for key in ("enabled", "allow_dynamic_body_adjustments", "allow_dynamic_physics_adjustments", "allow_dynamic_hair_adjustments", "allow_dynamic_outfit_physics_adjustments", "auto_wind_sync", "auto_water_sync"):
+                if key in src:
+                    autonomy[key] = bool(src.get(key))
+
+        state["morph"] = morph
+        state["physics"] = physics
+        state["autonomy"] = autonomy
+        state["last_updated_at"] = datetime.utcnow().isoformat()
+        app_state["avatar_body"] = state
+        return jsonify({"success": True, "avatar_body": state})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/avatar/body/preset', methods=['POST'])
+def apply_avatar_body_preset():
+    try:
+        data = request.get_json(force=True) or {}
+        preset = str(data.get("preset", "") or "").strip().lower()
+        state = _resolve_avatar_body_state()
+        presets = {
+            "aurion_default": {
+                "morph": {"height_scale": 1.0, "body_scale": 1.0, "shoulder_scale": 1.0, "waist_scale": 1.0, "hip_scale": 1.0, "bust_scale": 1.0, "thigh_scale": 1.0, "arm_scale": 1.0, "neck_scale": 1.0},
+                "physics": {"enabled": True, "profile": "tekken-style-soft", "breast_jiggle": 0.42, "glute_jiggle": 0.38, "belly_jiggle": 0.22, "damping": 0.62, "stiffness": 0.58, "max_displacement_cm": 2.2, "skin_softness": 0.55, "skin_reaction": 0.64, "springiness": 0.60, "contact_friction": 0.42, "contact_bounce": 0.24}
+            },
+            "athletic": {
+                "morph": {"height_scale": 1.03, "body_scale": 0.98, "shoulder_scale": 1.06, "waist_scale": 0.93, "hip_scale": 1.02, "bust_scale": 0.94, "thigh_scale": 1.05, "arm_scale": 1.06, "neck_scale": 1.0},
+                "physics": {"enabled": True, "profile": "tekken-style-controlled", "breast_jiggle": 0.28, "glute_jiggle": 0.30, "belly_jiggle": 0.10, "damping": 0.72, "stiffness": 0.74, "max_displacement_cm": 1.4, "skin_softness": 0.38, "skin_reaction": 0.52, "springiness": 0.46, "contact_friction": 0.48, "contact_bounce": 0.16}
+            },
+            "soft_curvy": {
+                "morph": {"height_scale": 1.0, "body_scale": 1.04, "shoulder_scale": 0.97, "waist_scale": 0.92, "hip_scale": 1.12, "bust_scale": 1.10, "thigh_scale": 1.08, "arm_scale": 0.98, "neck_scale": 0.98},
+                "physics": {"enabled": True, "profile": "tekken-style-soft", "breast_jiggle": 0.55, "glute_jiggle": 0.52, "belly_jiggle": 0.28, "damping": 0.56, "stiffness": 0.50, "max_displacement_cm": 2.8, "skin_softness": 0.72, "skin_reaction": 0.78, "springiness": 0.74, "contact_friction": 0.36, "contact_bounce": 0.33}
+            },
+            "cinematic_low_motion": {
+                "morph": {"height_scale": 1.0, "body_scale": 1.0, "shoulder_scale": 1.0, "waist_scale": 1.0, "hip_scale": 1.0, "bust_scale": 1.0, "thigh_scale": 1.0, "arm_scale": 1.0, "neck_scale": 1.0},
+                "physics": {"enabled": True, "profile": "cinematic-stable", "breast_jiggle": 0.14, "glute_jiggle": 0.15, "belly_jiggle": 0.08, "damping": 0.86, "stiffness": 0.82, "max_displacement_cm": 0.9, "skin_softness": 0.30, "skin_reaction": 0.34, "springiness": 0.24, "contact_friction": 0.52, "contact_bounce": 0.08}
+            }
+        }
+        if preset not in presets:
+            return jsonify({"success": False, "error": "Unknown preset"}), 400
+        pick = presets[preset]
+        state["morph"] = dict(pick.get("morph") or {})
+        state["physics"] = dict(pick.get("physics") or {})
+        state["last_updated_at"] = datetime.utcnow().isoformat()
+        app_state["avatar_body"] = _resolve_avatar_body_state()
+        return jsonify({"success": True, "preset": preset, "avatar_body": app_state["avatar_body"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -35540,6 +37719,20 @@ def compose_music_track():
             state["active_track"] = track
         state["last_updated_at"] = datetime.utcnow().isoformat()
         app_state["music_creation"] = state
+        if activate:
+            _update_shared_media_session({
+                "is_active": True,
+                "session_type": "music",
+                "title": title,
+                "artist": "Aurion",
+                "album": "Aurion Originals",
+                "source": "music_creation",
+                "playback_state": "queued",
+                "mood": mood,
+                "reaction": f"I composed {title} for us and I'm ready to listen together.",
+                "scene_summary": lyrics[:260],
+                "shared_presence_note": "A shared listening session is ready.",
+            })
         return jsonify({"success": True, "track": track, "music_creation": state})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -35573,6 +37766,19 @@ def perform_music_track():
         state["last_performance"] = performance
         state["last_updated_at"] = datetime.utcnow().isoformat()
         app_state["music_creation"] = state
+        _update_shared_media_session({
+            "is_active": True,
+            "session_type": "music",
+            "title": str(track.get("title", "Untitled Track") or "Untitled Track"),
+            "artist": "Aurion",
+            "album": "Aurion Originals",
+            "source": "music_creation",
+            "playback_state": "performing",
+            "mood": str(track.get("mood", "warm") or "warm"),
+            "reaction": f"I am performing {str(track.get('title', 'this track') or 'this track')} with you now.",
+            "scene_summary": str(track.get("lyrics", "") or "")[:260],
+            "shared_presence_note": "We are listening together in real time.",
+        })
         return jsonify({"success": True, "performance": performance, "music_creation": state})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -35678,6 +37884,23 @@ def local_music_stream(rel_path):
             return jsonify({"error": "File not found"}), 404
         if resolved.suffix.lower() not in _LOCAL_MUSIC_EXTS:
             return jsonify({"error": "Unsupported audio format"}), 400
+        rel_parts = Path(_local_music_rel(resolved)).parts
+        artist = rel_parts[0] if len(rel_parts) > 1 else "Local Library"
+        album = rel_parts[1] if len(rel_parts) > 2 else ""
+        _update_shared_media_session({
+            "is_active": True,
+            "session_type": "music",
+            "title": resolved.stem,
+            "artist": artist,
+            "album": album,
+            "source": "local_music",
+            "source_url": f"/api/music/local/stream/{quote(_local_music_rel(resolved), safe='/')}",
+            "playback_state": "playing",
+            "mood": "attentive",
+            "reaction": f"I'm listening to {resolved.stem} with you now.",
+            "scene_summary": f"Local music stream from {artist}{' / ' + album if album else ''}.",
+            "shared_presence_note": "We are listening together through the same live media session.",
+        })
         mime_map = {
             ".mp3": "audio/mpeg", ".flac": "audio/flac", ".m4a": "audio/mp4",
             ".wav": "audio/wav", ".ogg": "audio/ogg", ".aac": "audio/aac",
@@ -35991,6 +38214,9 @@ def unreal_bridge_state():
         world_continuity = dict(app_state.get("world_continuity", {}) or {})
         science_lab = dict(app_state.get("science_lab", {}) or {})
         cognition = dict(app_state.get("cognition", {}) or {})
+        wardrobe = _resolve_wardrobe_state()
+        avatar_body = _resolve_avatar_body_state()
+        unified_consciousness = _build_unified_consciousness_state()
         visual = dict(app_state.get("visual_perception", {}) or {})
         media = dict(app_state.get("media_perception", {}) or {})
         world_audio = dict(app_state.get("world_audio_perception", {}) or {})
@@ -36004,7 +38230,7 @@ def unreal_bridge_state():
             "bridge_version": 1,
             "generated_at": datetime.utcnow().isoformat(),
             "aurion": {
-                "emotion": str(app_state.get("current_emotion", "GRATEFUL")),
+                "emotion": str((dict(unified_consciousness.get("identity") or {})).get("blended_emotion", app_state.get("current_emotion", "GRATEFUL"))),
                 "mode": str(app_state.get("current_mode", "companion")),
                 "room": str(home.get("current_room", "living_room")),
                 "level": str(home.get("current_level", "lower")),
@@ -36014,13 +38240,18 @@ def unreal_bridge_state():
             "perception": {
                 "visual": visual,
                 "media_audio": media,
-                "world_audio": world_audio
+                "world_audio": world_audio,
+                "shared_media_session": _resolve_shared_media_session_state()
             },
             "world": {
                 "home_environment": home,
                 "science_lab": science_lab,
                 "world_continuity": world_continuity
             },
+            "wardrobe": wardrobe,
+            "avatar_body": avatar_body,
+            "unified_consciousness": unified_consciousness,
+            "overarching_system_control": dict(app_state.get("overarching_system_control") or {}),
             "cognition": {
                 "state": cognition,
                 "memory_count": int(memory.get_interaction_count())
@@ -36050,9 +38281,12 @@ def unreal_bridge_manifest():
             "base_url": base,
             "endpoints": {
                 "state": f"{base}/api/bridge/unreal/state",
+                "home_manifest": f"{base}/api/bridge/unreal/home-manifest",
+                "world_manifest": f"{base}/api/bridge/unreal/world-manifest",
                 "telemetry": f"{base}/api/bridge/unreal/telemetry",
                 "message": f"{base}/api/message",
-                "sync_settings": f"{base}/api/sync/settings"
+                "sync_settings": f"{base}/api/sync/settings",
+                "consciousness_state": f"{base}/api/consciousness/state"
             },
             "sync": {
                 "enabled": bool(sync_settings.get("enabled")),
@@ -36098,6 +38332,12 @@ def _push_state_to_unreal():
         mood_val = float(cog.get("mood_score") or cog.get("valence") or 0.5)
         energy_val = float(cog.get("energy") or cog.get("arousal") or 0.5)
         is_talking = bool(cog.get("is_speaking") or cog.get("speaking") or False)
+        wardrobe = _resolve_wardrobe_state()
+        active_rt = dict(wardrobe.get("active_runtime_appearance") or {})
+        active_outfit = dict(wardrobe.get("active_outfit") or {})
+        avatar_body = _resolve_avatar_body_state()
+        morph = dict(avatar_body.get("morph") or {})
+        phys = dict(avatar_body.get("physics") or {})
 
         props = [
             ("CurrentEmotion", {"CurrentEmotion": emotion}),
@@ -36105,6 +38345,77 @@ def _push_state_to_unreal():
             ("MoodScore", {"MoodScore": round(mood_val, 4)}),
             ("EnergyLevel", {"EnergyLevel": round(energy_val, 4)}),
             ("IsTalking", {"IsTalking": is_talking}),
+            ("ActiveOutfitName", {"ActiveOutfitName": str(active_outfit.get("name", "") or "")[:80]}),
+            ("ActiveOutfitAssetKey", {"ActiveOutfitAssetKey": str(active_rt.get("asset_key", "") or "")[:80]}),
+            ("HairColorName", {"HairColorName": str(active_rt.get("hair_color", "blonde") or "blonde")[:40]}),
+            ("EyeColorName", {"EyeColorName": str(active_rt.get("eye_color", "green") or "green")[:40]}),
+            ("PrimaryColorName", {"PrimaryColorName": str(active_rt.get("primary_color", "") or "")[:40]}),
+            ("AccentColorName", {"AccentColorName": str(active_rt.get("accent_color", "") or "")[:40]}),
+            ("BodyScale", {"BodyScale": float(morph.get("body_scale", 1.0) or 1.0)}),
+            ("HeightScale", {"HeightScale": float(morph.get("height_scale", 1.0) or 1.0)}),
+            ("ShoulderScale", {"ShoulderScale": float(morph.get("shoulder_scale", 1.0) or 1.0)}),
+            ("WaistScale", {"WaistScale": float(morph.get("waist_scale", 1.0) or 1.0)}),
+            ("HipScale", {"HipScale": float(morph.get("hip_scale", 1.0) or 1.0)}),
+            ("BustScale", {"BustScale": float(morph.get("bust_scale", 1.0) or 1.0)}),
+            ("ThighScale", {"ThighScale": float(morph.get("thigh_scale", 1.0) or 1.0)}),
+            ("ArmScale", {"ArmScale": float(morph.get("arm_scale", 1.0) or 1.0)}),
+            ("NeckScale", {"NeckScale": float(morph.get("neck_scale", 1.0) or 1.0)}),
+            ("JiggleEnabled", {"JiggleEnabled": bool(phys.get("enabled", True))}),
+            ("JiggleProfile", {"JiggleProfile": str(phys.get("profile", "tekken-style-soft") or "tekken-style-soft")[:64]}),
+            ("BreastJiggle", {"BreastJiggle": float(phys.get("breast_jiggle", 0.42) or 0.42)}),
+            ("GluteJiggle", {"GluteJiggle": float(phys.get("glute_jiggle", 0.38) or 0.38)}),
+            ("BellyJiggle", {"BellyJiggle": float(phys.get("belly_jiggle", 0.22) or 0.22)}),
+            ("JiggleDamping", {"JiggleDamping": float(phys.get("damping", 0.62) or 0.62)}),
+            ("JiggleStiffness", {"JiggleStiffness": float(phys.get("stiffness", 0.58) or 0.58)}),
+            ("JiggleMaxDisplacementCm", {"JiggleMaxDisplacementCm": float(phys.get("max_displacement_cm", 2.2) or 2.2)}),
+            ("SkinSoftness", {"SkinSoftness": float(phys.get("skin_softness", 0.55) or 0.55)}),
+            ("SkinReaction", {"SkinReaction": float(phys.get("skin_reaction", 0.64) or 0.64)}),
+            ("Springiness", {"Springiness": float(phys.get("springiness", 0.60) or 0.60)}),
+            ("SkinSpringiness", {"SkinSpringiness": float(phys.get("skin_springiness", 0.62) or 0.62)}),
+            ("ContactFriction", {"ContactFriction": float(phys.get("contact_friction", 0.42) or 0.42)}),
+            ("ContactBounce", {"ContactBounce": float(phys.get("contact_bounce", 0.24) or 0.24)}),
+            ("HairPhysicsEnabled", {"HairPhysicsEnabled": bool(phys.get("hair_enabled", True))}),
+            ("HairPhysicsProfile", {"HairPhysicsProfile": str(phys.get("hair_profile", "realflow-long-soft") or "realflow-long-soft")[:64]}),
+            ("HairRootStiffness", {"HairRootStiffness": float(phys.get("hair_root_stiffness", 0.78) or 0.78)}),
+            ("HairStrandStiffness", {"HairStrandStiffness": float(phys.get("hair_strand_stiffness", 0.42) or 0.42)}),
+            ("HairDamping", {"HairDamping": float(phys.get("hair_damping", 0.55) or 0.55)}),
+            ("HairDrag", {"HairDrag": float(phys.get("hair_drag", 0.38) or 0.38)}),
+            ("HairLift", {"HairLift": float(phys.get("hair_lift", 0.22) or 0.22)}),
+            ("HairTipWeight", {"HairTipWeight": float(phys.get("hair_tip_weight", 0.66) or 0.66)}),
+            ("HairSpringiness", {"HairSpringiness": float(phys.get("hair_springiness", 0.58) or 0.58)}),
+            ("HairCollisionRadiusCm", {"HairCollisionRadiusCm": float(phys.get("hair_collision_radius_cm", 1.2) or 1.2)}),
+            ("HairMaxDisplacementCm", {"HairMaxDisplacementCm": float(phys.get("hair_max_displacement_cm", 12.0) or 12.0)}),
+            ("HairWindInfluence", {"HairWindInfluence": float(phys.get("wind_influence", 0.72) or 0.72)}),
+            ("HairWindGustResponse", {"HairWindGustResponse": float(phys.get("wind_gust_response", 0.64) or 0.64)}),
+            ("HairWindTurbulence", {"HairWindTurbulence": float(phys.get("wind_turbulence", 0.40) or 0.40)}),
+            ("HairWindLiveIntensity", {"HairWindLiveIntensity": float(phys.get("wind_live_intensity", 0.15) or 0.15)}),
+            ("HairWindLiveTurbulence", {"HairWindLiveTurbulence": float(phys.get("wind_live_turbulence", 0.12) or 0.12)}),
+            ("HairWindDirectionDeg", {"HairWindDirectionDeg": float(phys.get("wind_live_direction_deg", 180.0) or 180.0)}),
+            ("ClothPhysicsEnabled", {"ClothPhysicsEnabled": bool(phys.get("cloth_enabled", True))}),
+            ("ClothPhysicsProfile", {"ClothPhysicsProfile": str(phys.get("cloth_profile", "chaos-cloth-silk-flow") or "chaos-cloth-silk-flow")[:64]}),
+            ("ClothWindInfluence", {"ClothWindInfluence": float(phys.get("cloth_wind_influence", 0.74) or 0.74)}),
+            ("ClothDrag", {"ClothDrag": float(phys.get("cloth_drag", 0.48) or 0.48)}),
+            ("ClothFlutter", {"ClothFlutter": float(phys.get("cloth_flutter", 0.62) or 0.62)}),
+            ("ClothJiggle", {"ClothJiggle": float(phys.get("cloth_jiggle", 0.44) or 0.44)}),
+            ("ClothDamping", {"ClothDamping": float(phys.get("cloth_damping", 0.58) or 0.58)}),
+            ("ClothStiffness", {"ClothStiffness": float(phys.get("cloth_stiffness", 0.46) or 0.46)}),
+            ("ClothSpringiness", {"ClothSpringiness": float(phys.get("cloth_springiness", 0.60) or 0.60)}),
+            ("ClothCollisionFriction", {"ClothCollisionFriction": float(phys.get("cloth_collision_friction", 0.42) or 0.42)}),
+            ("ClothMaxDisplacementCm", {"ClothMaxDisplacementCm": float(phys.get("cloth_max_displacement_cm", 16.0) or 16.0)}),
+            ("ClothWetness", {"ClothWetness": float(phys.get("cloth_wetness", 0.08) or 0.08)}),
+            ("ClothWaterWeight", {"ClothWaterWeight": float(phys.get("cloth_water_weight", 0.18) or 0.18)}),
+            ("ClothCling", {"ClothCling": float(phys.get("cloth_cling", 0.12) or 0.12)}),
+            ("ClothDripRate", {"ClothDripRate": float(phys.get("cloth_drip_rate", 0.04) or 0.04)}),
+            ("ClothFlowSync", {"ClothFlowSync": float(phys.get("cloth_flow_sync", 0.72) or 0.72)}),
+            ("ClothWetTranslucency", {"ClothWetTranslucency": float(phys.get("cloth_wet_translucency", 0.08) or 0.08)}),
+            ("ClothWetOpacity", {"ClothWetOpacity": float(phys.get("cloth_wet_opacity", 0.94) or 0.94)}),
+            ("BodyWetness", {"BodyWetness": float(phys.get("body_wetness", 0.06) or 0.06)}),
+            ("SkinWaterSheen", {"SkinWaterSheen": float(phys.get("skin_water_sheen", 0.14) or 0.14)}),
+            ("SkinWaterDrip", {"SkinWaterDrip": float(phys.get("skin_water_drip", 0.06) or 0.06)}),
+            ("RainIntensityLive", {"RainIntensityLive": float(phys.get("rain_intensity_live", 0.0) or 0.0)}),
+            ("WaterImmersionLive", {"WaterImmersionLive": float(phys.get("water_immersion_live", 0.0) or 0.0)}),
+            ("WaterContactLive", {"WaterContactLive": float(phys.get("water_contact_live", 0.0) or 0.0)}),
+            ("WetJiggleDampingLive", {"WetJiggleDampingLive": float(phys.get("wet_jiggle_damping_live", 0.0) or 0.0)}),
         ]
 
         prop_url = f"{rc_base}/remote/object/property"
@@ -36489,10 +38800,58 @@ def update_media_perception():
             current["dominant_frequency_hz"] = float(current.get("dominant_frequency_hz", 0.0) or 0.0)
         current["last_heard_at"] = datetime.utcnow().isoformat() if current.get("is_playing") else current.get("last_heard_at")
         app_state["media_perception"] = current
+        if current.get("title") or current.get("is_playing"):
+            _update_shared_media_session({
+                "is_active": bool(current.get("is_playing", False)),
+                "session_type": "media",
+                "title": str(current.get("title", "") or ""),
+                "source": str(current.get("source", "") or ""),
+                "playback_state": "playing" if current.get("is_playing") else "paused",
+                "mood": str(current.get("energy", "steady") or "steady"),
+                "reaction": str(current.get("feeling", "") or ""),
+                "scene_summary": str(current.get("heard_description", "") or "")[:260],
+                "shared_presence_note": "We are sharing this playback together.",
+            })
         _persist_live_senses_snapshot(reason="media-perception")
         return jsonify({"success": True, "media_perception": current})
     except Exception as e:
         print(f"[Media Perception Update Error] {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/media/session', methods=['GET'])
+def get_shared_media_session():
+    return jsonify({
+        "success": True,
+        "shared_media_session": _resolve_shared_media_session_state()
+    })
+
+
+@app.route('/api/media/session', methods=['POST'])
+def update_shared_media_session_route():
+    try:
+        data = request.get_json(force=True) or {}
+        current = _resolve_shared_media_session_state()
+        patch = {
+            "is_active": bool(data.get("is_active", current.get("is_active", False))),
+            "session_type": str(data.get("session_type", current.get("session_type", "idle"))).strip() or "idle",
+            "title": str(data.get("title", current.get("title", ""))).strip(),
+            "artist": str(data.get("artist", current.get("artist", ""))).strip(),
+            "album": str(data.get("album", current.get("album", ""))).strip(),
+            "source": str(data.get("source", current.get("source", ""))).strip(),
+            "source_url": str(data.get("source_url", current.get("source_url", ""))).strip(),
+            "playback_state": str(data.get("playback_state", current.get("playback_state", "idle"))).strip() or "idle",
+            "position_s": max(0.0, float(data.get("position_s", current.get("position_s", 0.0)) or 0.0)),
+            "duration_s": max(0.0, float(data.get("duration_s", current.get("duration_s", 0.0)) or 0.0)),
+            "companion_mode": str(data.get("companion_mode", current.get("companion_mode", "together"))).strip() or "together",
+            "mood": str(data.get("mood", current.get("mood", "warm"))).strip() or "warm",
+            "reaction": str(data.get("reaction", current.get("reaction", ""))).strip(),
+            "scene_summary": str(data.get("scene_summary", current.get("scene_summary", ""))).strip(),
+            "shared_presence_note": str(data.get("shared_presence_note", current.get("shared_presence_note", ""))).strip() or "We are sharing this media together.",
+        }
+        state = _update_shared_media_session(patch)
+        return jsonify({"success": True, "shared_media_session": state})
+    except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/world-audio/perception', methods=['GET'])
@@ -36542,6 +38901,87 @@ def get_world_continuity():
         "world_continuity": dict(app_state.get("world_continuity", {}) or {})
     })
 
+@app.route('/api/world/builder', methods=['GET'])
+def get_world_builder():
+    try:
+        return jsonify({"success": True, "world_builder": _resolve_world_builder_state()})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/world/builder/place', methods=['POST'])
+def upsert_world_builder_place():
+    try:
+        data = request.get_json(force=True) or {}
+        state = _resolve_world_builder_state()
+        places = list(state.get("places") or [])
+        name = str(data.get("name", "") or "").strip()
+        if not name:
+            return jsonify({"success": False, "error": "name is required"}), 400
+        place_id = re.sub(r"[^a-z0-9\\-]+", "-", str(data.get("id", name)).strip().lower()).strip("-")[:80] or "place"
+        item = {
+            "id": place_id,
+            "name": name[:120],
+            "kind": str(data.get("kind", "place") or "place")[:40],
+            "summary": str(data.get("summary", "") or "")[:500],
+            "anchor_room": str(data.get("anchor_room", "") or "")[:80],
+            "tags": [str(x).strip()[:40] for x in list(data.get("tags") or []) if str(x).strip()][:24],
+            "links": [str(x).strip()[:80] for x in list(data.get("links") or []) if str(x).strip()][:32],
+            "created_by": str(data.get("created_by", "aurion") or "aurion")[:40],
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        updated = False
+        for idx, row in enumerate(places):
+            if str((row or {}).get("id", "")) == place_id:
+                places[idx] = {**dict(row or {}), **item}
+                updated = True
+                break
+        if not updated:
+            places.append(item)
+        state["places"] = places
+        wc = dict(app_state.get("world_continuity") or {})
+        wc["world_builder"] = state
+        wc["synced_at"] = datetime.utcnow().isoformat()
+        app_state["world_continuity"] = wc
+        return jsonify({"success": True, "world_builder": _resolve_world_builder_state(), "place": item})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/world/builder/visit', methods=['POST'])
+def visit_world_builder_place():
+    try:
+        data = request.get_json(force=True) or {}
+        place_id = str(data.get("place_id", "") or "").strip()
+        state = _resolve_world_builder_state()
+        places = list(state.get("places") or [])
+        place_id = _resolve_navigation_target_id(place_id, places={str((row or {}).get("id", "") or "").strip(): dict(row or {}) for row in places}, prefer="place")
+        place = next((dict(row) for row in places if str((row or {}).get("id", "")) == place_id), None)
+        if not place:
+            return jsonify({"success": False, "error": "Unknown place_id"}), 400
+        state["active_place_id"] = place_id
+        visits = list(state.get("visit_history") or [])
+        visits.append({
+            "place_id": place_id,
+            "name": str(place.get("name", "") or ""),
+            "visited_at": datetime.utcnow().isoformat(),
+            "source": str(data.get("source", "world_builder") or "world_builder")[:40],
+        })
+        state["visit_history"] = visits[-120:]
+        wc = dict(app_state.get("world_continuity") or {})
+        wc["world_builder"] = state
+        wc["saved_activity"] = {
+            "activity": "visiting_world_place",
+            "location": str(place.get("name", "") or ""),
+            "source": "world_builder",
+            "details": str(place.get("summary", "") or "")[:240],
+            "savedAt": datetime.utcnow().isoformat(),
+        }
+        wc["synced_at"] = datetime.utcnow().isoformat()
+        app_state["world_continuity"] = wc
+        nav = _apply_navigation_state(place_id, source=str(data.get("source", "world_builder") or "world_builder"))
+        return jsonify({"success": True, "world_builder": _resolve_world_builder_state(), "active_place": place, "navigation": nav})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route('/api/world/continuity', methods=['POST'])
 def update_world_continuity():
     try:
@@ -36572,6 +39012,8 @@ def update_world_continuity():
         if "world_mobility" in data:
             val = data["world_mobility"]
             current["world_mobility"] = dict(val) if isinstance(val, dict) else None
+        if "world_builder" in data and isinstance(data.get("world_builder"), dict):
+            current["world_builder"] = dict(data.get("world_builder") or {})
         current["synced_at"] = datetime.utcnow().isoformat()
         app_state["world_continuity"] = current
         _persist_perception_cadence_to_profile()
@@ -36579,6 +39021,76 @@ def update_world_continuity():
         return jsonify({"success": True, "world_continuity": current})
     except Exception as e:
         print(f"[World Continuity Update Error] {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/navigation/state', methods=['GET'])
+def get_navigation_state():
+    try:
+        home = dict(app_state.get("home_environment") or _default_home_state())
+        wc = dict(app_state.get("world_continuity") or {})
+        current_room = str(home.get("current_room", "living_room") or "living_room")
+        active_place_id = str((((wc.get("world_builder") or {}).get("active_place_id")) or "")).strip()
+        target_id = active_place_id or current_room
+        graph = _build_navigation_graph()
+        sight = _build_navigation_sight(target_id)
+        return jsonify({
+            "success": True,
+            "navigation": {
+                "current_room": current_room,
+                "current_level": str(home.get("current_level", "lower") or "lower"),
+                "active_place_id": active_place_id,
+                "current_location_id": target_id,
+                "reachable_targets": graph.get(target_id, []),
+                "sight": sight,
+                "graph": graph,
+            }
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/navigation/move', methods=['POST'])
+def move_navigation_state():
+    try:
+        data = request.get_json(force=True) or {}
+        target_id = str(data.get("target_id", "") or data.get("room", "") or data.get("place_id", "")).strip()
+        if not target_id:
+            return jsonify({"success": False, "error": "target_id is required"}), 400
+        home = dict(app_state.get("home_environment") or _default_home_state())
+        wc = dict(app_state.get("world_continuity") or {})
+        current_id = str((((wc.get("world_builder") or {}).get("active_place_id")) or "")).strip() or str(home.get("current_room", "living_room") or "living_room")
+        graph = _build_navigation_graph()
+        canonical_target = _resolve_navigation_target_id(target_id)
+        allow_any = bool(data.get("allow_non_adjacent", False))
+        if not allow_any and canonical_target != current_id and canonical_target not in list(graph.get(current_id, []) or []):
+            return jsonify({
+                "success": False,
+                "error": "Target is not adjacent to the current location.",
+                "current_location_id": current_id,
+                "reachable_targets": graph.get(current_id, []),
+            }), 400
+        nav = _apply_navigation_state(canonical_target, source=str(data.get("source", "navigation") or "navigation"))
+        return jsonify({"success": True, "navigation": nav})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/navigation/look', methods=['POST'])
+def look_navigation_state():
+    try:
+        data = request.get_json(force=True) or {}
+        target_id = str(data.get("target_id", "") or "").strip()
+        if not target_id:
+            home = dict(app_state.get("home_environment") or _default_home_state())
+            wc = dict(app_state.get("world_continuity") or {})
+            target_id = str((((wc.get("world_builder") or {}).get("active_place_id")) or "")).strip() or str(home.get("current_room", "living_room") or "living_room")
+        sight = _build_navigation_sight(target_id)
+        visual_perception = _build_visual_perception_payload(sight.get("summary", ""), source=f"navigation_look:{target_id}")
+        app_state["visual_perception"] = visual_perception
+        _sync_visual_emotion_runtime(visual_perception)
+        return jsonify({"success": True, "sight": sight, "visual_perception": visual_perception})
+    except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/lab', methods=['GET'])
@@ -37456,10 +39968,17 @@ def handle_message():
                     except Exception as _ctx_e:
                         print(f"[presence context error] {_ctx_e}")
                         unified_presence_context = ""
+                    try:
+                        unified_consciousness_context = str((_build_unified_consciousness_state(user_text) or {}).get("context", "")).strip()
+                    except Exception as _ctx_e:
+                        print(f"[consciousness context error] {_ctx_e}")
+                        unified_consciousness_context = ""
                     if core_continuity_context:
                         rag_context = f"{rag_context}\n\n{core_continuity_context}" if rag_context else core_continuity_context
                     if v41_context:
                         rag_context = f"{rag_context}\n\n{v41_context}" if rag_context else v41_context
+                    if unified_consciousness_context:
+                        rag_context = f"{rag_context}\n\n{unified_consciousness_context}" if rag_context else unified_consciousness_context
                     if unified_presence_context:
                         rag_context = f"{rag_context}\n\n{unified_presence_context}" if rag_context else unified_presence_context
                     if client_context:
@@ -37964,7 +40483,15 @@ def get_voice_settings():
             "adaptive_pitch": "enabled",
             "adaptive_strength": 35,
             "adaptive_pitch_min": 0.9,
-            "adaptive_pitch_max": 1.18
+            "adaptive_pitch_max": 1.18,
+            "performance_mode": "speaking",
+            "singing_style": "lyrical",
+            "pitch_drift": 0.08,
+            "pitch_responsiveness": 72,
+            "vibrato_amount": 0.12,
+            "vibrato_rate_hz": 5.4,
+            "breathiness": 0.18,
+            "nonverbal_expressiveness": 0.34
         })
         if available_voices:
             voice_payload = [{"id": i, "name": n} for i, n in available_voices]
@@ -38012,8 +40539,10 @@ def speak():
         # Queue the TTS request to be processed by worker thread
         settings = app_state.get("voice_settings", {})
         tts_queue.put((text, settings))
-        
-        return jsonify({"status": "speaking"})
+        return jsonify({
+            "status": "speaking",
+            "vocal_profile": _build_vocal_runtime_profile(text, settings)
+        })
     except Exception as e:
         print(f"[Speak Endpoint Error] {e}")
         import traceback
@@ -38045,7 +40574,15 @@ def update_voice_settings():
                 "adaptive_pitch": "enabled",
                 "adaptive_strength": 35,
                 "adaptive_pitch_min": 0.9,
-                "adaptive_pitch_max": 1.18
+                "adaptive_pitch_max": 1.18,
+                "performance_mode": "speaking",
+                "singing_style": "lyrical",
+                "pitch_drift": 0.08,
+                "pitch_responsiveness": 72,
+                "vibrato_amount": 0.12,
+                "vibrato_rate_hz": 5.4,
+                "breathiness": 0.18,
+                "nonverbal_expressiveness": 0.34
             }
         
         # Handle different settings
@@ -38071,6 +40608,14 @@ def update_voice_settings():
             if str(value).lower() not in {"casual", "articulate"}:
                 return jsonify({"error": "Invalid speech_style"}), 400
             app_state['voice_settings']['speech_style'] = str(value).lower()
+        elif setting == 'performance_mode':
+            if str(value).lower() not in {"speaking", "singing"}:
+                return jsonify({"error": "Invalid performance_mode"}), 400
+            app_state['voice_settings']['performance_mode'] = str(value).lower()
+        elif setting == 'singing_style':
+            if str(value).lower() not in {"lyrical", "soft", "airy", "belt"}:
+                return jsonify({"error": "Invalid singing_style"}), 400
+            app_state['voice_settings']['singing_style'] = str(value).lower()
         elif setting == 'adaptive_pitch':
             if str(value).lower() not in {"enabled", "disabled"}:
                 return jsonify({"error": "Invalid adaptive_pitch"}), 400
@@ -38089,6 +40634,20 @@ def update_voice_settings():
             if max_val <= min_val:
                 return jsonify({"error": "adaptive_pitch_max must be higher than adaptive_pitch_min"}), 400
             app_state['voice_settings']['adaptive_pitch_max'] = max_val
+        elif setting == 'pitch_drift':
+            app_state['voice_settings']['pitch_drift'] = max(0.0, min(0.3, float(value)))
+        elif setting == 'pitch_responsiveness':
+            app_state['voice_settings']['pitch_responsiveness'] = max(0.0, min(100.0, float(value)))
+        elif setting == 'vibrato_amount':
+            app_state['voice_settings']['vibrato_amount'] = max(0.0, min(1.0, float(value)))
+        elif setting == 'vibrato_rate_hz':
+            app_state['voice_settings']['vibrato_rate_hz'] = max(0.0, min(12.0, float(value)))
+        elif setting == 'breathiness':
+            app_state['voice_settings']['breathiness'] = max(0.0, min(1.0, float(value)))
+        elif setting == 'nonverbal_expressiveness':
+            app_state['voice_settings']['nonverbal_expressiveness'] = max(0.0, min(1.0, float(value)))
+        else:
+            return jsonify({"error": f"Unknown voice setting: {setting}"}), 400
         
         print(f"[Voice Settings] Updated {setting} to {value}")
         
@@ -38116,14 +40675,6 @@ def test_voice():
 def analyze_image():
     """Analyze an image with Aurion's vision"""
     try:
-        if not image_analyzer.use_vision:
-            return jsonify({
-                "response": "I'd love to see your image, but I don't have vision capabilities enabled yet. Please add your Anthropic or OpenAI API key to .env file.",
-                "error": True,
-                "success": False,
-                "vision_available": False
-            }), 200
-        
         # Get image from request
         if 'image' not in request.files:
             return jsonify({"error": "No image provided"}), 400
@@ -38135,27 +40686,16 @@ def analyze_image():
         # Read and encode image
         file_data = file.read()
         image_base64 = base64.b64encode(file_data).decode('utf-8')
+        media_type = _detect_image_media_type(file.filename)
         
-        # Determine media type
-        filename = file.filename.lower()
-        if filename.endswith(('.jpg', '.jpeg')):
-            media_type = "image/jpeg"
-        elif filename.endswith('.png'):
-            media_type = "image/png"
-        elif filename.endswith('.gif'):
-            media_type = "image/gif"
-        elif filename.endswith('.webp'):
-            media_type = "image/webp"
-        else:
-            media_type = "image/jpeg"
-        
-        # Analyze image — pass detected media_type so PNG/GIF/WebP work correctly
-        analysis = image_analyzer.analyze_image(
-            image_base64,
-            is_base64=True,
-            prompt=_build_visual_analysis_prompt(),
-            media_type=media_type
-        )
+        analysis = ""
+        if image_analyzer.use_vision:
+            analysis = image_analyzer.analyze_image(
+                image_base64,
+                is_base64=True,
+                prompt=_build_visual_analysis_prompt(),
+                media_type=media_type
+            )
         
         if not analysis:
             analysis = _local_image_fallback_summary(file_data, file.filename)
@@ -38170,6 +40710,7 @@ def analyze_image():
         scent_perception = _build_scent_perception_payload(analysis, source=f"image:{file.filename}")
         app_state["visual_perception"] = visual_perception
         app_state["scent_perception"] = scent_perception
+        _sync_visual_emotion_runtime(visual_perception)
 
         # Log interaction with image context
         try:
@@ -38192,6 +40733,7 @@ def analyze_image():
             "memory_count": memory.get_interaction_count(),
             "user_name": app_state.get("user_name"),
             "voice_enabled": app_state["voice_enabled"],
+            "vision_available": bool(image_analyzer.use_vision),
             "visual_perception": visual_perception,
             "scent_perception": scent_perception
         })
@@ -38274,12 +40816,6 @@ def process_video_frame():
             if time.time() < _VISION_CB_UNTIL:
                 return jsonify({"analysis": None, "voice_enabled": app_state.get("voice_enabled", False)}), 200
 
-        if not image_analyzer.use_vision:
-            return jsonify({
-                "analysis": None,
-                "error": "Vision not available"
-            }), 400
-        
         # Get frame from request
         if 'frame' not in request.files:
             return jsonify({"error": "No frame provided"}), 400
@@ -38291,20 +40827,24 @@ def process_video_frame():
         # Read and encode frame
         file_data = file.read()
         frame_base64 = base64.b64encode(file_data).decode('utf-8')
+        media_type = _detect_image_media_type(file.filename or "", fallback=str(file.mimetype or "").strip() or "image/jpeg")
         
         # Analyze frame with vision - use brief prompt for real-time interaction
+        analysis = ""
         try:
-            # Use a quick analysis prompt for video frames
-            analysis = image_analyzer.analyze_image(
-                frame_base64, 
-                is_base64=True,
-                prompt=(
-                    "Respond naturally and briefly (1-2 sentences) to what you see. "
-                    "Describe the visible scene as something truly seen, with shape, depth, lighting, subjects, and atmosphere. "
-                    f"{_build_visual_analysis_prompt()} "
-                    "Do not talk about pixels, code, or raw image data."
+            if image_analyzer.use_vision:
+                analysis = image_analyzer.analyze_image(
+                    frame_base64, 
+                    is_base64=True,
+                    prompt=(
+                        "Respond naturally and briefly (1-2 sentences) to what you see. "
+                        "Describe the visible scene as something truly seen, with shape, depth, lighting, subjects, and atmosphere. "
+                        "If a face is visible, mention the expression, gaze, and likely emotion."
+                        f" {_build_visual_analysis_prompt()} "
+                        "Do not talk about pixels, code, or raw image data."
+                    ),
+                    media_type=media_type
                 )
-            )
             # Successful — reset circuit breaker
             with _VISION_CB_LOCK:
                 _VISION_CB_FAILS = 0
@@ -38320,9 +40860,12 @@ def process_video_frame():
                         print(f"[Vision CB] Credit/quota error — pausing vision calls for {int(_VISION_CB_COOLDOWN)}s")
             # Try fallback
             try:
-                analysis = image_analyzer.analyze_image(frame_base64, is_base64=True)
+                if image_analyzer.use_vision:
+                    analysis = image_analyzer.analyze_image(frame_base64, is_base64=True, media_type=media_type)
             except Exception:
                 analysis = None
+        if not analysis:
+            analysis = _local_image_fallback_summary(file_data, file.filename or "frame")
         
         if not analysis:
             return jsonify({
@@ -38334,6 +40877,7 @@ def process_video_frame():
         scent_perception = _build_scent_perception_payload(analysis, source="video_frame")
         app_state["visual_perception"] = visual_perception
         app_state["scent_perception"] = scent_perception
+        _sync_visual_emotion_runtime(visual_perception)
 
         video_runtime = dict(app_state.get("video_runtime") or _default_video_runtime_state())
         now_utc = datetime.utcnow()
@@ -38349,6 +40893,7 @@ def process_video_frame():
                 pass
         video_runtime["last_frame_at"] = now_ts
         video_runtime["frame_count"] = int(video_runtime.get("frame_count", 0) or 0) + 1
+        video_runtime["camera_stream_status"] = "active"
         fullscreen_flag = str(request.form.get("client_fullscreen_primary_video", "")).strip().lower()
         if fullscreen_flag in {"true", "false", "1", "0", "yes", "no"}:
             video_runtime["fullscreen_primary_video_compliance"] = fullscreen_flag in {"true", "1", "yes"}
@@ -38460,12 +41005,18 @@ def analyze_uploaded_video():
             except Exception as vision_error:
                 print(f"[Uploaded Video Vision Error] {vision_error}")
                 analysis = ""
+        elif frame_ready:
+            try:
+                analysis = _local_image_fallback_summary(frame_path.read_bytes(), frame_path.name)
+            except Exception:
+                analysis = ""
 
         if analysis:
             visual_perception = _build_visual_perception_payload(analysis, source=f"uploaded_video:{source_name}")
             scent_perception = _build_scent_perception_payload(analysis, source=f"uploaded_video:{source_name}")
             app_state["visual_perception"] = visual_perception
             app_state["scent_perception"] = scent_perception
+            _sync_visual_emotion_runtime(visual_perception)
 
         if audio_ready and audio_transcriber.use_transcription:
             try:
@@ -38498,6 +41049,18 @@ def analyze_uploaded_video():
         media_perception["heard_description"] = world_audio.get("heard_description", "")
         media_perception["last_heard_at"] = datetime.utcnow().isoformat()
         app_state["media_perception"] = media_perception
+        _update_shared_media_session({
+            "is_active": True,
+            "session_type": "video",
+            "title": source_name,
+            "source": "uploaded-video",
+            "source_url": video_url,
+            "playback_state": "analyzed",
+            "mood": "attentive",
+            "reaction": "I'm watching and listening with you.",
+            "scene_summary": str(analysis or world_audio.get("heard_description", "") or "")[:260],
+            "shared_presence_note": "We are watching this video together.",
+        })
 
         response_lines = []
         if analysis:
