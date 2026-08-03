@@ -23173,16 +23173,20 @@ HTML_TEMPLATE = """
                 const index = musicState.currentIndex >= 0 ? musicState.currentIndex : 0;
                 await playTrackAt(index, false);
                 const label = musicState.queue[index]?.title || 'Untitled track';
-                return `Aurion started music: ${label}.`;
+                return `I started the music: ${label}.`;
+            }
+            // Don't interrupt an actively playing track; only consider an action
+            // near the end or when explicitly asked (preferNext=true).
+            const remaining = Number.isFinite(player.duration)
+                ? Math.max(0, player.duration - player.currentTime)
+                : null;
+            if (!preferNext && (remaining === null || remaining > 15)) {
+                return '';
             }
             if (preferNext || Math.random() < 0.35) {
                 await playNextTrack();
                 const nextLabel = musicState.queue[musicState.currentIndex]?.title || 'Untitled track';
-                return `Aurion moved to the next track: ${nextLabel}.`;
-            }
-            if (Math.random() < 0.18) {
-                player.pause();
-                return 'Aurion paused the music for a quiet moment.';
+                return `I moved to the next track: ${nextLabel}.`;
             }
             return '';
         }
@@ -23197,16 +23201,16 @@ HTML_TEMPLATE = """
                 const index = homeState.videoIndex >= 0 ? homeState.videoIndex : 0;
                 await playVideoAt(index);
                 const label = homeState.videoQueue[index]?.title || 'Untitled video';
-                return `Aurion started a video: ${label}.`;
+                return `I started a video: ${label}.`;
             }
             if (preferNext || Math.random() < 0.32) {
                 playNextVideo();
                 const nextLabel = homeState.videoQueue[homeState.videoIndex]?.title || 'Untitled video';
-                return `Aurion switched to the next video: ${nextLabel}.`;
+                return `I switched to the next video: ${nextLabel}.`;
             }
             if (hasInlineVideo && videoEl && Math.random() < 0.16 && !videoEl.paused) {
                 videoEl.pause();
-                return 'Aurion paused the video for a short break.';
+                return 'I paused the video for a short break.';
             }
             return '';
         }
@@ -24970,11 +24974,15 @@ HTML_TEMPLATE = """
                 _persistPlexAutonomyState();
 
                 const kindLabel = data.kind === 'music' ? '🎵' : '🎬';
-                addMessage(`${kindLabel} Aurion queued: ${data.title || 'Plex media'}`, 'joi');
+                addMessage(`${kindLabel} I queued: ${data.title || 'Plex media'}`, 'joi');
 
                 if (data.kind === 'music') {
                     const musicPlayer = document.getElementById('musicPlayer');
                     if (musicPlayer) {
+                        // Preserve current track continuity unless nothing is playing.
+                        if (musicPlayer.src && !musicPlayer.paused && musicPlayer.currentTime > 2) {
+                            return;
+                        }
                         musicPlayer.src = data.url;
                         musicPlayer.volume = vol;
                         musicPlayer.play().catch(() => {});
@@ -33307,7 +33315,7 @@ def local_music_library():
                                 "title": f.stem,
                                 "file": f.name,
                                 "ext": f.suffix.lower(),
-                                "url": f"/api/music/local/stream/{_local_music_rel(f)}"
+                                "url": f"/api/music/local/stream/{quote(_local_music_rel(f), safe='/')}"
                             })
                     if tracks:
                         artist_entry["albums"].append({"name": album_dir.name, "tracks": tracks})
@@ -33319,7 +33327,7 @@ def local_music_library():
                         "title": album_dir.stem,
                         "file": album_dir.name,
                         "ext": album_dir.suffix.lower(),
-                        "url": f"/api/music/local/stream/{_local_music_rel(album_dir)}"
+                        "url": f"/api/music/local/stream/{quote(_local_music_rel(album_dir), safe='/')}"
                     })
             if artist_entry["albums"]:
                 artists.append(artist_entry)
@@ -33352,7 +33360,7 @@ def local_music_search():
                     "album": album,
                     "file": f.name,
                     "ext": f.suffix.lower(),
-                    "url": f"/api/music/local/stream/{rel}"
+                    "url": f"/api/music/local/stream/{quote(rel, safe='/')}"
                 })
                 if len(results) >= limit:
                     break
@@ -33380,8 +33388,13 @@ def local_music_stream(rel_path):
             ".wma": "audio/x-ms-wma", ".opus": "audio/opus"
         }
         mime = mime_map.get(resolved.suffix.lower(), "audio/mpeg")
-        return send_from_directory(str(resolved.parent), resolved.name, mimetype=mime,
-                                   as_attachment=False)
+        return send_from_directory(
+            str(resolved.parent),
+            resolved.name,
+            mimetype=mime,
+            as_attachment=False,
+            conditional=True
+        )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
