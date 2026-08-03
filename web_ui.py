@@ -34,6 +34,28 @@ from urllib.parse import quote, urlparse, parse_qs, urlencode, urlunparse
 
 # Load environment variables from .env file
 load_dotenv()
+
+def _hydrate_env_from_downloads():
+    """Load optional key files from Downloads so standalone builds self-configure."""
+    downloads_dir = Path.home() / "Downloads"
+    if not downloads_dir.exists():
+        return
+    candidate_files = (
+        "aurion_provider_keys.env",
+        "aurion_phone_keys.env",
+        "discord.env",
+        "twitch.env",
+    )
+    for filename in candidate_files:
+        file_path = downloads_dir / filename
+        if not file_path.exists() or not file_path.is_file():
+            continue
+        try:
+            load_dotenv(dotenv_path=file_path, override=True)
+        except Exception:
+            continue
+
+_hydrate_env_from_downloads()
 warnings.filterwarnings(
     "ignore",
     message=r"datetime\.datetime\.utcnow\(\) is deprecated.*",
@@ -63,10 +85,150 @@ _AURION_MODEL_DIR = Path(__file__).resolve().parent / "static" / "models"
 _AURION_MODEL_BASENAME = "aurion-default"
 _AURION_MODEL_EXTENSIONS = (".glb", ".gltf", ".vrm")
 _AURION_REFERENCE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
-_AURION_REFERENCE_DIR = Path(str(os.getenv(
-    "AURION_AVATAR_REFERENCE_DIR",
-    r"D:\Reallusion\Reallusion Custom\Media\Texture\ImageGen"
-)).strip())
+_AURION_REFERENCE_ENV = str(os.getenv("AURION_AVATAR_REFERENCE_DIR", "")).strip()
+_AURION_REFERENCE_FALLBACK_DIR = Path(r"D:\Reallusion\Reallusion Custom\Media\Texture\ImageGen")
+_AURION_REFERENCE_CACHE = {
+    "at": 0.0,
+    "dir": None,
+    "images": [],
+    "palette_at": 0.0,
+    "palette": None,
+}
+
+def _candidate_aurion_reference_dirs():
+    home = Path.home()
+    downloads = home / "Downloads"
+    candidates = []
+    if _AURION_REFERENCE_ENV:
+        candidates.append(Path(_AURION_REFERENCE_ENV))
+    candidates.extend([
+        downloads / "aurion_all_frames",
+        downloads / "Aurion_all_frames",
+        downloads / "aurion-all-frames",
+        downloads / "aurion all frames",
+        _AURION_REFERENCE_FALLBACK_DIR,
+    ])
+    seen = set()
+    unique = []
+    for p in candidates:
+        key = str(p).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(p)
+    return unique
+
+def _list_reference_images_in_dir(path: Path):
+    if not path or not path.exists() or not path.is_dir():
+        return []
+    files = []
+    for ext in _AURION_REFERENCE_EXTENSIONS:
+        files.extend(path.glob(f"*{ext}"))
+        files.extend(path.glob(f"*{ext.upper()}"))
+    unique = {}
+    for p in files:
+        if p.exists() and p.is_file():
+            unique[str(p.resolve()).lower()] = p
+    files = list(unique.values())
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return files
+
+def _collect_avatar_reference_images(force_refresh=False):
+    now = time.time()
+    cache_age = now - float(_AURION_REFERENCE_CACHE.get("at") or 0.0)
+    if (not force_refresh) and cache_age < 15 and _AURION_REFERENCE_CACHE.get("images") is not None:
+        return _AURION_REFERENCE_CACHE.get("dir"), list(_AURION_REFERENCE_CACHE.get("images") or [])
+    ranked = []
+    for path in _candidate_aurion_reference_dirs():
+        imgs = _list_reference_images_in_dir(path)
+        if imgs:
+            newest = float(imgs[0].stat().st_mtime)
+            ranked.append((path, imgs, len(imgs), newest))
+        elif path.exists() and path.is_dir():
+            ranked.append((path, [], 0, 0.0))
+    ranked.sort(key=lambda item: (item[2], item[3]), reverse=True)
+    if ranked:
+        best_dir, best_images = ranked[0][0], ranked[0][1]
+    else:
+        best_dir, best_images = None, []
+    _AURION_REFERENCE_CACHE["at"] = now
+    _AURION_REFERENCE_CACHE["dir"] = best_dir
+    _AURION_REFERENCE_CACHE["images"] = list(best_images)
+    return best_dir, list(best_images)
+
+def _rgb_to_hex(rgb):
+    try:
+        r = max(0, min(255, int(rgb[0])))
+        g = max(0, min(255, int(rgb[1])))
+        b = max(0, min(255, int(rgb[2])))
+        return f"#{r:02x}{g:02x}{b:02x}"
+    except Exception:
+        return "#ffffff"
+
+def _average_rgb(samples):
+    if not samples:
+        return (255, 255, 255)
+    total_r = 0
+    total_g = 0
+    total_b = 0
+    for r, g, b in samples:
+        total_r += int(r)
+        total_g += int(g)
+        total_b += int(b)
+    n = max(1, len(samples))
+    return (round(total_r / n), round(total_g / n), round(total_b / n))
+
+def _extract_avatar_reference_palette(force_refresh=False):
+    now = time.time()
+    palette_age = now - float(_AURION_REFERENCE_CACHE.get("palette_at") or 0.0)
+    if (not force_refresh) and palette_age < 90 and _AURION_REFERENCE_CACHE.get("palette"):
+        return dict(_AURION_REFERENCE_CACHE.get("palette") or {})
+    ref_dir, images = _collect_avatar_reference_images(force_refresh=force_refresh)
+    if not images:
+        palette = {
+            "exists": False,
+            "count": 0,
+            "directory": str(ref_dir) if ref_dir else "",
+        }
+        _AURION_REFERENCE_CACHE["palette_at"] = now
+        _AURION_REFERENCE_CACHE["palette"] = dict(palette)
+        return palette
+    sample_paths = images[: min(36, len(images))]
+    hair_samples = []
+    skin_samples = []
+    eye_samples = []
+    for path in sample_paths:
+        try:
+            with Image.open(path) as im:
+                rgb = im.convert("RGB").resize((64, 64))
+                pix = rgb.load()
+                for y in range(3, 16):
+                    for x in range(16, 48):
+                        hair_samples.append(pix[x, y])
+                for y in range(24, 44):
+                    for x in range(18, 46):
+                        skin_samples.append(pix[x, y])
+                for y in range(19, 30):
+                    for x in range(22, 42):
+                        eye_samples.append(pix[x, y])
+        except Exception:
+            continue
+    hair_rgb = _average_rgb(hair_samples)
+    skin_rgb = _average_rgb(skin_samples)
+    eye_rgb = _average_rgb(eye_samples)
+    palette = {
+        "exists": True,
+        "count": len(images),
+        "directory": str(ref_dir) if ref_dir else "",
+        "sample_count": len(sample_paths),
+        "hair_hex": _rgb_to_hex(hair_rgb),
+        "skin_hex": _rgb_to_hex(skin_rgb),
+        "eye_hex": _rgb_to_hex(eye_rgb),
+        "latest_filename": images[0].name,
+    }
+    _AURION_REFERENCE_CACHE["palette_at"] = now
+    _AURION_REFERENCE_CACHE["palette"] = dict(palette)
+    return palette
 
 def _find_aurion_default_model_path():
     for ext in _AURION_MODEL_EXTENSIONS:
@@ -85,16 +247,9 @@ def _make_aurion_default_model_url(model_path: Path):
 
 def _find_latest_avatar_reference_image():
     try:
-        if not _AURION_REFERENCE_DIR.exists() or not _AURION_REFERENCE_DIR.is_dir():
-            return None
-        candidates = []
-        for ext in _AURION_REFERENCE_EXTENSIONS:
-            candidates.extend(_AURION_REFERENCE_DIR.glob(f"*{ext}"))
-            candidates.extend(_AURION_REFERENCE_DIR.glob(f"*{ext.upper()}"))
-        files = [p for p in candidates if p.exists() and p.is_file()]
+        _ref_dir, files = _collect_avatar_reference_images()
         if not files:
             return None
-        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return files[0]
     except Exception:
         return None
@@ -168,9 +323,10 @@ def api_avatar_portrait():
 
 @app.route('/api/avatar/reference/latest/meta', methods=['GET'])
 def api_avatar_reference_latest_meta():
+    ref_dir, refs = _collect_avatar_reference_images()
     ref = _find_latest_avatar_reference_image()
     if not ref:
-        return jsonify({"success": True, "exists": False, "url": "", "filename": ""})
+        return jsonify({"success": True, "exists": False, "url": "", "filename": "", "directory": str(ref_dir) if ref_dir else "", "count": 0})
     try:
         version = int(ref.stat().st_mtime_ns)
     except Exception:
@@ -178,6 +334,8 @@ def api_avatar_reference_latest_meta():
     return jsonify({
         "success": True,
         "exists": True,
+        "count": len(refs),
+        "directory": str(ref_dir) if ref_dir else "",
         "filename": ref.name,
         "url": f"/api/avatar/reference/latest?v={version}"
     })
@@ -189,6 +347,15 @@ def api_avatar_reference_latest():
         return jsonify({"success": False, "error": "No reference image found."}), 404
     try:
         return send_file(str(ref), conditional=True)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/avatar/reference/palette', methods=['GET'])
+def api_avatar_reference_palette():
+    try:
+        force = str(request.args.get("refresh", "")).strip().lower() in {"1", "true", "yes", "on"}
+        palette = _extract_avatar_reference_palette(force_refresh=force)
+        return jsonify({"success": True, "palette": palette})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 def _env_bool(name, default=False):
@@ -601,6 +768,27 @@ def _load_discord_receive_config_from_downloads():
             print(f"[PhoneLink] Could not parse Discord receive config file {file_path}: {e}")
     return merged
 
+def _load_twitch_receive_config_from_downloads():
+    candidates = [
+        Path.home() / "Downloads" / "twitch.env",
+        Path.home() / "Downloads" / "twitch bot.txt",
+        Path.home() / "Downloads" / "twitch-bot.txt",
+        Path.home() / "Downloads" / "twitch_bot.txt",
+        Path.home() / "Downloads" / "Twitch bot.txt",
+        Path.home() / "Downloads" / "Twitch-bot.txt",
+        Path.home() / "Downloads" / "Twitch_bot.txt",
+    ]
+    merged = {}
+    for file_path in candidates:
+        if not file_path.exists() or not file_path.is_file():
+            continue
+        try:
+            raw = file_path.read_text(encoding="utf-8", errors="ignore")
+            merged.update(_parse_kv_lines(raw))
+        except Exception as e:
+            print(f"[PhoneLink] Could not parse Twitch receive config file {file_path}: {e}")
+    return merged
+
 def _hydrate_twilio_env_from_local_sources(force=False):
     global _twilio_env_hydrated_at
     now = datetime.utcnow()
@@ -910,6 +1098,8 @@ SYNC_SETTINGS_DEFAULTS = {
     "auto_interval_seconds": max(10, _env_int("AURION_SYNC_AUTO_INTERVAL_SECONDS", 90)),
     "last_push_at": None,
     "last_pull_at": None,
+    "last_remote_pushed_at": None,
+    "last_conflict": "",
     "last_sync_status": "idle"
 }
 
@@ -4291,6 +4481,22 @@ def _safe_json_loads(text, default):
         return default
     return loaded if isinstance(loaded, type(default)) else default
 
+def _default_compute_boost_state():
+    return {
+        "enabled": True,
+        "cloud_first": True,
+        "max_context": True,
+        "web_research": True,
+        "orchestration_mode": "combo",
+        "combo_mode": "dual_synthesize",
+        "target_quality": "ultra",
+        "target_fps": 120,
+        "physics_substeps": 8,
+        "autonomy_tick_ms": 15000,
+        "last_applied_at": None,
+        "last_provider": ""
+    }
+
 def _json_sanitize_payload(value):
     """Recursively coerce payload values to JSON-safe primitives."""
     if value is None:
@@ -4816,6 +5022,19 @@ app_state = {
         "mode": "auto",                  # single | auto | round_robin | combo
         "combo_mode": "dual_synthesize", # off | dual_synthesize
         "enabled_providers": []          # empty => all available
+    },
+    "compute_boost": _default_compute_boost_state(),
+    "unreal_bridge": {
+        "status": "idle",
+        "client": "",
+        "map": "",
+        "quality": "",
+        "fps": 0.0,
+        "last_state_pull_at": None,
+        "last_telemetry_at": None,
+        "rc_status": "idle",
+        "rc_actor_path": "",
+        "rc_last_push_at": None
     }
 }
 
@@ -4917,6 +5136,18 @@ def _int_from_life(life_dict, key, fallback):
     except Exception:
         return int(fallback)
 
+def _safe_get_profile():
+    try:
+        return memory.get_profile() or {}
+    except Exception as e:
+        print(f"[Profile Load Fallback] {e}")
+        try:
+            memory.self_repair()
+            return memory.get_profile() or {}
+        except Exception as e2:
+            print(f"[Profile Load Fallback Repair Failed] {e2}")
+            return {}
+
 def _sanitize_constructs(items):
     normalized = []
     for raw in list(items or []):
@@ -4945,7 +5176,7 @@ def _sync_audio_registry_modes_to_perception():
         app_state[key] = current
 
 def _load_capability_learning_from_profile():
-    profile = memory.get_profile() or {}
+    profile = _safe_get_profile()
     life = dict(profile.get("life_context", {}) or {})
     vision_registry = _default_vision_registry()
     vision_registry["documented_modes"] = _sanitize_registry_entries(_safe_json_loads(life.get("vision_custom_modes_json", "[]"), []), vision_registry["documented_modes"])
@@ -5053,7 +5284,7 @@ def _persist_llm_orchestration_to_profile():
     memory.add_profile_item("life_context", json.dumps(payload), key="llm_orchestration_json")
 
 def _load_llm_orchestration_from_profile():
-    profile = memory.get_profile() or {}
+    profile = _safe_get_profile()
     life = dict(profile.get("life_context", {}) or {})
     loaded = _safe_json_loads(life.get("llm_orchestration_json", "{}"), {})
     if not isinstance(loaded, dict):
@@ -5071,8 +5302,103 @@ def _load_llm_orchestration_from_profile():
     except Exception:
         pass
 
+def _sanitize_compute_boost_settings(raw):
+    defaults = _default_compute_boost_state()
+    source = raw if isinstance(raw, dict) else {}
+    mode = str(source.get("orchestration_mode", defaults["orchestration_mode"])).strip().lower() or defaults["orchestration_mode"]
+    if mode not in {"single", "auto", "round_robin", "combo"}:
+        mode = defaults["orchestration_mode"]
+    combo = str(source.get("combo_mode", defaults["combo_mode"])).strip().lower() or defaults["combo_mode"]
+    if combo not in {"off", "dual_synthesize"}:
+        combo = defaults["combo_mode"]
+    quality = str(source.get("target_quality", defaults["target_quality"])).strip().lower() or defaults["target_quality"]
+    if quality not in {"high", "ultra", "cinematic"}:
+        quality = defaults["target_quality"]
+    return {
+        "enabled": source.get("enabled", defaults["enabled"]) is not False,
+        "cloud_first": source.get("cloud_first", defaults["cloud_first"]) is not False,
+        "max_context": source.get("max_context", defaults["max_context"]) is not False,
+        "web_research": source.get("web_research", defaults["web_research"]) is not False,
+        "orchestration_mode": mode,
+        "combo_mode": combo,
+        "target_quality": quality,
+        "target_fps": max(60, min(240, int(source.get("target_fps", defaults["target_fps"]) or defaults["target_fps"]))),
+        "physics_substeps": max(2, min(16, int(source.get("physics_substeps", defaults["physics_substeps"]) or defaults["physics_substeps"]))),
+        "autonomy_tick_ms": max(5000, min(90000, int(source.get("autonomy_tick_ms", defaults["autonomy_tick_ms"]) or defaults["autonomy_tick_ms"]))),
+        "last_applied_at": source.get("last_applied_at"),
+        "last_provider": str(source.get("last_provider", defaults["last_provider"])).strip()
+    }
+
+def _persist_compute_boost_to_profile():
+    payload = _sanitize_compute_boost_settings(app_state.get("compute_boost", {}))
+    memory.add_profile_item("life_context", json.dumps(payload), key="compute_boost_json")
+
+def _load_compute_boost_from_profile():
+    profile = _safe_get_profile()
+    life = dict(profile.get("life_context", {}) or {})
+    loaded = _safe_json_loads(life.get("compute_boost_json", "{}"), {})
+    merged = _sanitize_compute_boost_settings({**_default_compute_boost_state(), **(loaded if isinstance(loaded, dict) else {})})
+    app_state["compute_boost"] = merged
+
+def _apply_cloud_compute_boost(force=False):
+    settings = _sanitize_compute_boost_settings(app_state.get("compute_boost", {}))
+    if not settings.get("enabled", True):
+        app_state["compute_boost"] = settings
+        return {"applied": False, "reason": "disabled", "provider": getattr(personality_engine, "llm_provider", "none")}
+    if not force:
+        try:
+            last = str(settings.get("last_applied_at") or "").strip()
+            if last:
+                delta = datetime.utcnow() - datetime.fromisoformat(last)
+                if delta.total_seconds() < 180:
+                    return {"applied": True, "reason": "recent", "provider": str(getattr(personality_engine, "llm_provider", "none") or "none")}
+        except Exception:
+            pass
+
+    now_iso = datetime.utcnow().isoformat()
+    clients = personality_engine._refresh_llm_clients()
+    connected = list(clients.keys())
+    remote_priority = ["openrouter", "anthropic", "openai", "gemini", "cohere", "m365copilot"]
+    local_priority = ["ollama", "sillytavern", "oobabooga"]
+    ordered = remote_priority + local_priority if settings.get("cloud_first", True) else local_priority + remote_priority
+    selected = next((p for p in ordered if p in clients), None) or next(iter(clients.keys()), None)
+
+    if selected:
+        personality_engine.llm_provider = selected
+        personality_engine.llm_client = clients[selected]
+        personality_engine.use_llm = True
+
+    if settings.get("max_context", True):
+        personality_engine.cot_enabled = True
+        personality_engine.recall_personal_chars = max(5200, int(getattr(personality_engine, "recall_personal_chars", 3200) or 3200))
+        personality_engine.recall_global_chars = max(26000, int(getattr(personality_engine, "recall_global_chars", 12000) or 12000))
+        personality_engine.recall_session_chars = max(12000, int(getattr(personality_engine, "recall_session_chars", 6000) or 6000))
+        personality_engine.recall_rag_chars = max(18000, int(getattr(personality_engine, "recall_rag_chars", 9000) or 9000))
+        personality_engine.recall_rag_limit = max(96, int(getattr(personality_engine, "recall_rag_limit", 36) or 36))
+
+    if connected:
+        app_state["llm_orchestration"] = {
+            "mode": settings.get("orchestration_mode", "combo"),
+            "combo_mode": settings.get("combo_mode", "dual_synthesize"),
+            "enabled_providers": connected
+        }
+        personality_engine.llm_orchestration = dict(app_state["llm_orchestration"])
+
+    wc = dict(app_state.get("world_continuity", {}) or {})
+    wc["display_resolution"] = "8k-supersampled" if settings.get("target_quality") in {"ultra", "cinematic"} else "4k"
+    wc["perception_cadence_hz"] = max(int(wc.get("perception_cadence_hz", 244) or 244), int(settings.get("target_fps", 120)))
+    wc["world_patience"] = 100
+    app_state["world_continuity"] = wc
+
+    settings["last_applied_at"] = now_iso
+    settings["last_provider"] = selected or ""
+    app_state["compute_boost"] = settings
+    _persist_llm_orchestration_to_profile()
+    _persist_compute_boost_to_profile()
+    return {"applied": bool(selected), "provider": selected or "none", "connected_providers": connected}
+
 def _load_custom_models_from_profile():
-    profile = memory.get_profile() or {}
+    profile = _safe_get_profile()
     life = dict(profile.get("life_context", {}) or {})
     saved = _safe_json_loads(life.get("custom_models_json", "{}"), {})
     if isinstance(saved, dict):
@@ -5120,7 +5446,7 @@ def _persist_perception_cadence_to_profile():
 
 def _load_perception_cadence_from_profile():
     """Restore perception settings, lab state, CRISPR/lattice/health from profile on startup."""
-    profile = memory.get_profile() or {}
+    profile = _safe_get_profile()
     life = dict(profile.get("life_context", {}) or {})
     wc = dict(app_state.get("world_continuity", {}) or {})
     res = str(life.get("perception_display_resolution", wc.get("display_resolution", "4k"))).strip().lower() or "4k"
@@ -5212,11 +5538,13 @@ def _sanitize_sync_settings(raw):
         merged["auto_interval_seconds"] = 0
     merged["last_push_at"] = incoming.get("last_push_at")
     merged["last_pull_at"] = incoming.get("last_pull_at")
+    merged["last_remote_pushed_at"] = incoming.get("last_remote_pushed_at")
+    merged["last_conflict"] = str(incoming.get("last_conflict", "") or "").strip()[:160]
     merged["last_sync_status"] = str(incoming.get("last_sync_status", "idle"))
     return merged
 
 def _load_sync_settings_from_profile():
-    profile = memory.get_profile() or {}
+    profile = _safe_get_profile()
     life = dict(profile.get("life_context", {}) or {})
     default_enabled = SYNC_SETTINGS_DEFAULTS.get("enabled", False)
     default_interval = int(SYNC_SETTINGS_DEFAULTS.get("auto_interval_seconds", 90))
@@ -5227,12 +5555,14 @@ def _load_sync_settings_from_profile():
         "provider": "github_gist",
         "gist_id": str(life.get("sync_gist_id", default_gist_id)).strip(),
         "device_id": str(life.get("sync_device_id", default_device_id)).strip() or default_device_id,
-        "auto_interval_seconds": int(str(life.get("sync_auto_interval_seconds", str(default_interval))).strip() or default_interval)
+        "auto_interval_seconds": int(str(life.get("sync_auto_interval_seconds", str(default_interval))).strip() or default_interval),
+        "last_remote_pushed_at": str(life.get("sync_last_remote_pushed_at", "")).strip() or None,
+        "last_conflict": str(life.get("sync_last_conflict", "")).strip()
     }
     app_state["sync_settings"] = _sanitize_sync_settings(loaded)
 
 def _load_creative_autonomy_from_profile():
-    profile = memory.get_profile() or {}
+    profile = _safe_get_profile()
     life = dict(profile.get("life_context", {}) or {})
     defaults = dict(app_state.get("creative_autonomy", {}) or {})
     enabled_default = bool(defaults.get("enabled", True))
@@ -5261,7 +5591,7 @@ def _sanitize_behavior_settings(raw):
     return merged
 
 def _load_behavior_settings_from_profile():
-    profile = memory.get_profile() or {}
+    profile = _safe_get_profile()
     life = dict(profile.get("life_context", {}) or {})
     defaults = dict(app_state.get("behavior_settings", {}) or {})
     def _life_int(key, fallback):
@@ -5325,7 +5655,7 @@ def _sanitize_code_autonomy_settings(incoming):
     return merged
 
 def _load_code_autonomy_from_profile():
-    profile = memory.get_profile() or {}
+    profile = _safe_get_profile()
     life = dict(profile.get("life_context", {}) or {})
     defaults = dict(app_state.get("code_autonomy", {}) or {})
     min_gap_raw = str(life.get("code_autonomy_min_gap_seconds", defaults.get("min_gap_seconds", 180))).strip()
@@ -5359,7 +5689,7 @@ def _persist_code_autonomy_to_profile(settings):
     memory.add_profile_item("life_context", str(normalized["auto_tick_interval_seconds"]), key="code_autonomy_auto_tick_interval_seconds")
 
 def _load_v41_doc_from_profile():
-    profile = memory.get_profile() or {}
+    profile = _safe_get_profile()
     life = dict(profile.get("life_context", {}) or {})
     defaults = dict(app_state.get("v41_doc", {}) or {})
     app_state["v41_doc"] = {
@@ -5385,6 +5715,8 @@ def _persist_sync_settings_to_profile(settings):
     memory.add_profile_item("life_context", normalized["gist_id"], key="sync_gist_id")
     memory.add_profile_item("life_context", normalized["device_id"], key="sync_device_id")
     memory.add_profile_item("life_context", str(normalized["auto_interval_seconds"]), key="sync_auto_interval_seconds")
+    memory.add_profile_item("life_context", str(normalized.get("last_remote_pushed_at") or ""), key="sync_last_remote_pushed_at")
+    memory.add_profile_item("life_context", str(normalized.get("last_conflict") or ""), key="sync_last_conflict")
 
 def _resolve_sync_token(request_token=None):
     token = str(request_token or "").strip()
@@ -5481,8 +5813,26 @@ def _sync_now(direction="both", reason="manual"):
         pulled_stats = {}
         if direction in {"both", "pull"}:
             payload = _fetch_sync_payload_from_gist(gist_id, token)
-            pulled_stats = memory.import_sync_snapshot(payload)
-            settings["last_pull_at"] = datetime.utcnow().isoformat()
+            remote_source = dict(payload.get("source", {}) or {})
+            remote_pushed_at_text = str(remote_source.get("pushed_at", "")).strip() or None
+            remote_pushed_at = _safe_parse_iso(remote_pushed_at_text)
+            local_push_at = _safe_parse_iso(settings.get("last_push_at"))
+            auto_reason = str(reason or "").strip().lower() in {"startup", "status_poll", "message", "auto"}
+            should_skip_pull = (
+                direction == "both"
+                and auto_reason
+                and remote_pushed_at is not None
+                and local_push_at is not None
+                and remote_pushed_at < local_push_at
+            )
+            if should_skip_pull:
+                pulled_stats = {"skipped_pull": True, "skip_reason": "remote_older_than_local"}
+                settings["last_conflict"] = "remote_older_than_local"
+            else:
+                pulled_stats = memory.import_sync_snapshot(payload)
+                settings["last_pull_at"] = datetime.utcnow().isoformat()
+                settings["last_conflict"] = ""
+            settings["last_remote_pushed_at"] = remote_pushed_at_text
         if direction in {"both", "push"}:
             payload = memory.export_sync_snapshot()
             payload["source"] = {
@@ -5492,6 +5842,7 @@ def _sync_now(direction="both", reason="manual"):
             }
             _push_sync_payload_to_gist(gist_id, token, payload)
             settings["last_push_at"] = datetime.utcnow().isoformat()
+            settings["last_remote_pushed_at"] = settings["last_push_at"]
 
         settings["last_sync_status"] = f"{direction}_ok"
         app_state["sync_settings"] = settings
@@ -7366,9 +7717,14 @@ def _aurion_full_autonomy_tick():
             recent_user = ""
 
         if cfg.get("auto_tick_enabled", True):
+            scene_snapshot = app_state.get("latest_client_scene_snapshot") if isinstance(app_state.get("latest_client_scene_snapshot"), dict) else {}
+            scene_brief = _scene_snapshot_brief(scene_snapshot)
+            scene_context = str(app_state.get("latest_client_world_context") or "").strip()[:1600]
             seed_text = (
                 "Autonomous maintenance cycle. Review continuity, memory, and active project threads."
                 + (f" Context: {recent_user}" if recent_user else "")
+                + (f" Scene: {scene_brief}" if scene_brief else "")
+                + (f" ClientContext: {scene_context}" if scene_context else "")
             )
             _autonomous_code_edit_tick(
                 user_text=seed_text,
@@ -7458,6 +7814,8 @@ _load_capability_learning_from_profile()
 _load_perception_cadence_from_profile()
 _load_custom_models_from_profile()
 _load_llm_orchestration_from_profile()
+_load_compute_boost_from_profile()
+_apply_cloud_compute_boost(force=True)
 # Restore plex_autonomy settings from saved profile
 try:
     _pa_saved = (memory.get_profile() or {}).get("plex_autonomy")
@@ -8596,8 +8954,12 @@ def _enforce_original_response(user_text, response_text, rag_context="", behavio
     banned_openings = (
         "thanks for laying that out",
         "tell me which part you want to start with",
+        "yes billy",
     )
     looks_stock = any(phrase in normalized for phrase in banned_openings)
+    repetitive_yes_billy = bool(re.match(r"^(aurion:\s*)?(yes[\s,!.-]*billy\b[\s,!.-]*){1,}", normalized))
+    if repetitive_yes_billy:
+        looks_stock = True
     is_unoriginal = personality_engine._is_unoriginal_response(response, recent_responses)
     if not looks_stock and not is_unoriginal:
         return response
@@ -9183,6 +9545,10 @@ HTML_TEMPLATE = """
             opacity: var(--avatar-hair-opacity, 0.88);
             z-index: 2;
             pointer-events: none;
+        }
+        #aurionOfflinePortrait.avatar-loaded::before {
+            opacity: 0;
+            transition: opacity 260ms ease;
         }
         .avatar::after {
             content: '';
@@ -11768,6 +12134,14 @@ HTML_TEMPLATE = """
                     </select>
                 </div>
                 <div class="setting-group">
+                    <label class="setting-label">Outfit name</label>
+                    <input id="avatarOutfitNameInput" class="profile-input" type="text" placeholder="Aurion Signature Night" />
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Saved outfits</label>
+                    <select id="avatarSavedOutfitSelect" class="profile-input"></select>
+                </div>
+                <div class="setting-group">
                     <label class="setting-label">3D animation</label>
                     <select id="avatarAnimSelect" class="profile-input" onchange="applyAvatarPresentation()">
                         <option value="float3d" selected>Float</option>
@@ -11973,6 +12347,10 @@ HTML_TEMPLATE = """
                 <button onclick="aurionChooseOwnAvatar(true)">Aurion Choose Avatar</button>
                 <button onclick="toggleAvatarAutonomy()">Toggle Avatar Autonomy</button>
                 <button onclick="openAvatarModelPicker()">&#127900; Switch 3D Model</button>
+                <button onclick="useAvatarReferenceFrames()">Use Downloads Frames for 3D</button>
+                <button onclick="saveCurrentAvatarOutfit(true)">Save Outfit</button>
+                <button onclick="applySavedAvatarOutfit(true)">Wear Saved Outfit</button>
+                <button onclick="aurionDesignOwnOutfit(true)">Aurion Design Outfit</button>
                 <button onclick="loadUserProfile()">Refresh Profile</button>
             </div>
             <div class="profile-summary" id="profileSummary">Loading profile...</div>
@@ -13803,6 +14181,7 @@ HTML_TEMPLATE = """
                         <button onclick="importPlexVideos('all')">Import All Videos</button>
                         <button onclick="importPlexMusic(14)">Import Music</button>
                         <button onclick="importPlexMusic('all')">Import All Music</button>
+                        <button onclick="openPlexWebWindow()">Open Plex Web</button>
                         <button onclick="clearPlexLogin()">Clear Login</button>
                     </div>
                     <div class="home-subtle" id="plexControlStatus">Plex control panel ready.</div>
@@ -13851,10 +14230,35 @@ HTML_TEMPLATE = """
                     </div>
                     <div class="music-controls" style="margin-top: 6px;">
                         <button onclick="savePlexControlPanel()">Apply Controls</button>
+                        <button onclick="openPlexWebWindow()">Plex Web Window</button>
                         <button onclick="openAppSettingsDialog()">Open Runtime Settings</button>
                     </div>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- Plex Web Window -->
+    <div class="modal" id="plexWebModal">
+        <div class="modal-content" style="max-width: 1280px; width: 96vw; height: 86vh; display:flex; flex-direction:column;">
+            <div class="modal-header">
+                <span>📺 Plex Web</span>
+                <button class="modal-close" onclick="closeModal('plexWebModal')">✕</button>
+            </div>
+            <div class="setting-group" style="margin-bottom:8px;">
+                <label class="setting-label" style="min-width: 95px;">Plex URL</label>
+                <input id="plexWebUrlInput" class="profile-input" type="text" placeholder="https://your-plex-server:32400/web/index.html" />
+                <button onclick="reloadPlexWebWindow()">Load</button>
+                <button onclick="openPlexWebInNewTab()">Open Tab</button>
+            </div>
+            <div class="home-subtle" id="plexWebStatus" style="margin-bottom:8px;">Plex web window ready.</div>
+            <iframe
+                id="plexWebFrame"
+                title="Plex Web Player"
+                style="flex:1; width:100%; border:1px solid rgba(168,85,247,0.4); border-radius:10px; background:#05070f;"
+                referrerpolicy="no-referrer"
+                allow="autoplay; fullscreen"
+            ></iframe>
         </div>
     </div>
 
@@ -14094,6 +14498,7 @@ HTML_TEMPLATE = """
         ];
         const AVATAR_LIBRARY_2D_KEY = 'aurion_avatar_library_2d';
         const AVATAR_LIBRARY_3D_KEY = 'aurion_avatar_library_3d';
+        const AVATAR_WARDROBE_LIBRARY_KEY = 'aurion_avatar_wardrobe_library';
         const AVATAR_MODEL_URL_KEY = 'aurion_avatar_model_url';
         const AVATAR_ACTIVE_MODE_KEY = 'aurion_avatar_active_mode';
         const AVATAR_AUTO_ENABLED_KEY = 'aurion_avatar_auto_enabled';
@@ -14191,13 +14596,17 @@ HTML_TEMPLATE = """
             { key: 'yard', label: 'Yard', outdoor: true },
             { key: 'garden', label: 'Garden', outdoor: true },
             { key: 'porch', label: 'Porch', outdoor: true },
+            { key: 'outside', label: 'Outside Window', outdoor: true },
             { key: 'kitchen', label: 'Kitchen', outdoor: false },
             { key: 'library', label: 'Library', outdoor: false },
             { key: 'studio', label: 'Studio', outdoor: false },
             { key: 'skydeck', label: 'Sky Deck', outdoor: true },
             { key: 'master-bedroom', label: 'Master Bedroom', outdoor: false },
             { key: 'dream-suite', label: 'Dream Suite', outdoor: false },
-            { key: 'science-lab', label: 'Science Lab', outdoor: false }
+            { key: 'science-lab', label: 'Science Lab', outdoor: false },
+            { key: 'city-center', label: 'City Center', outdoor: true },
+            { key: 'forest-trail', label: 'Forest Trail', outdoor: true },
+            { key: 'coastline', label: 'Coastline', outdoor: true }
         ];
         const HOUSE_ADDITION_TEMPLATES = [
             { zoneKey: 'dream-suite', label: 'Dream Suite', amenity: 'Dream Suite', description: 'a serene master bedroom with a beautiful canopy bed, layered covers, and quiet low-light stars above', outdoor: false, comfortDelta: 9, ambienceDelta: 8, catalogAdds: ['Soft Blankets', 'Fairy Lights', 'Mood Lanterns'] },
@@ -14360,6 +14769,18 @@ HTML_TEMPLATE = """
                 savedAt: 0,
                 lastResumedAt: 0,
                 canResume: false
+            };
+        }
+        function createDefaultSimsAutonomyState() {
+            return {
+                enabled: true,
+                companionMode: true,
+                worldTravelEnabled: true,
+                routine: 'dynamic',
+                lastMoveAt: 0,
+                lastWorldTravelAt: 0,
+                lastLoginSyncAt: 0,
+                stuckRoomEscapes: 0
             };
         }
         function createDefaultSleepCycleState() {
@@ -16103,6 +16524,7 @@ HTML_TEMPLATE = """
                 },
                 worldMobility: createDefaultWorldMobilityState(),
                 activityResume: createDefaultActivityResumeState(),
+                simsAutonomy: createDefaultSimsAutonomyState(),
                 scienceLab: createDefaultLabState(),
                 sleepCycle: createDefaultSleepCycleState()
             },
@@ -16229,8 +16651,11 @@ HTML_TEMPLATE = """
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Local',
             timezoneLabel: ''
         };
+        if (!localStorage.getItem(AVATAR_ACTIVE_MODE_KEY)) {
+            localStorage.setItem(AVATAR_ACTIVE_MODE_KEY, '3d');
+        }
         let avatarState = {
-            activeMode: String(localStorage.getItem(AVATAR_ACTIVE_MODE_KEY) || '2d').toLowerCase() === '3d' ? '3d' : '2d',
+            activeMode: String(localStorage.getItem(AVATAR_ACTIVE_MODE_KEY) || '3d').toLowerCase() === '3d' ? '3d' : '2d',
             autonomyEnabled: String(localStorage.getItem(AVATAR_AUTO_ENABLED_KEY) || 'enabled') !== 'disabled',
             autonomyIntervalMs: clampMs(localStorage.getItem(AVATAR_AUTO_INTERVAL_MS_KEY), 120000, 30000, 900000),
             lastDecisionAt: 0
@@ -16275,11 +16700,12 @@ HTML_TEMPLATE = """
                 const showPortrait = (url) => {
                     portrait2d.src = url + '?v=' + Date.now();
                     portrait2d.onload = () => {
-                        portrait2d.style.display = 'block';
-                        if (portraitWrap) portraitWrap.classList.add('portrait-2d-active');
+                        const prefers3D = String(avatarState.activeMode || '3d') === '3d';
+                        portrait2d.style.display = prefers3D ? 'none' : 'block';
+                        if (portraitWrap) {
+                            portraitWrap.classList.toggle('portrait-2d-active', !prefers3D);
+                        }
                         localStorage.setItem(AVATAR_STORAGE_KEY, url);
-                        localStorage.setItem(AVATAR_ACTIVE_MODE_KEY, '2d');
-                        avatarState.activeMode = '2d';
                     };
                 };
 
@@ -16299,6 +16725,10 @@ HTML_TEMPLATE = """
         }
 
         function initializeAvatar() {
+            if (!localStorage.getItem(AVATAR_ACTIVE_MODE_KEY)) {
+                localStorage.setItem(AVATAR_ACTIVE_MODE_KEY, '3d');
+                avatarState.activeMode = '3d';
+            }
             const savedAvatar = localStorage.getItem(AVATAR_STORAGE_KEY);
             if (savedAvatar) {
                 applyAvatarImage(savedAvatar);
@@ -16378,6 +16808,11 @@ HTML_TEMPLATE = """
             if (document.getElementById('avatarHairBangsSlider')) document.getElementById('avatarHairBangsSlider').value = savedHairBangs;
             if (document.getElementById('avatarHairHueSlider')) document.getElementById('avatarHairHueSlider').value = savedHairHue;
             _applyAurionReferenceAvatarDefaults();
+            refreshAvatarWardrobeSelect();
+            if (getAvatarWardrobeLibrary().length === 0) {
+                const seed = _captureCurrentOutfitSnapshot('Aurion Signature');
+                persistAvatarWardrobeLibrary([seed]);
+            }
             applyAvatarPresentation();
         }
 
@@ -16467,7 +16902,45 @@ HTML_TEMPLATE = """
             return '';
         }
 
+        let _aurionReferencePaletteCache = null;
+        let _aurionReferencePaletteFetchAt = 0;
+
+        async function fetchAurionReferencePalette(forceRefresh = false) {
+            const now = Date.now();
+            if (!forceRefresh && _aurionReferencePaletteCache && (now - _aurionReferencePaletteFetchAt) < 90000) {
+                return _aurionReferencePaletteCache;
+            }
+            try {
+                const url = forceRefresh ? '/api/avatar/reference/palette?refresh=1' : '/api/avatar/reference/palette';
+                const res = await fetch(url);
+                if (!res.ok) return null;
+                const data = await res.json().catch(() => ({}));
+                const palette = data && data.success ? data.palette : null;
+                if (palette && palette.exists) {
+                    _aurionReferencePaletteCache = palette;
+                    _aurionReferencePaletteFetchAt = now;
+                }
+                return palette || null;
+            } catch (_error) {
+                return null;
+            }
+        }
+
+        async function useAvatarReferenceFrames() {
+            const palette = await fetchAurionReferencePalette(true);
+            if (!palette || !palette.exists) {
+                addMessage('No reference frames found. Put image frames in Downloads\\\\aurion_all_frames.', 'joi');
+                return;
+            }
+            addMessage(`Reference pack linked: ${palette.count} frames from ${palette.directory}`, 'joi');
+            await reloadAurionWorld3D();
+        }
+
         async function reloadAurionWorld3D() {
+            const portraitWrap = document.getElementById('aurionOfflinePortrait');
+            if (portraitWrap) {
+                portraitWrap.classList.remove('avatar-loaded');
+            }
             destroyAurionWorld3D();
             await new Promise((resolve) => setTimeout(resolve, 80));
             initAurionWorld3D();
@@ -16642,6 +17115,138 @@ HTML_TEMPLATE = """
             _applyRoleplayClasses();
         }
 
+        function getAvatarWardrobeLibrary() {
+            try {
+                const raw = localStorage.getItem(AVATAR_WARDROBE_LIBRARY_KEY);
+                if (!raw) return [];
+                const parsed = JSON.parse(raw);
+                if (!Array.isArray(parsed)) return [];
+                return parsed.filter((row) => row && typeof row === 'object').slice(-120);
+            } catch (_e) {
+                return [];
+            }
+        }
+
+        function persistAvatarWardrobeLibrary(rows) {
+            const arr = Array.isArray(rows) ? rows.slice(-120) : [];
+            localStorage.setItem(AVATAR_WARDROBE_LIBRARY_KEY, JSON.stringify(arr));
+            refreshAvatarWardrobeSelect();
+        }
+
+        function refreshAvatarWardrobeSelect() {
+            const sel = document.getElementById('avatarSavedOutfitSelect');
+            if (!sel) return;
+            const rows = getAvatarWardrobeLibrary();
+            const prior = String(sel.value || '');
+            if (!rows.length) {
+                sel.innerHTML = '<option value="">No saved outfits yet</option>';
+                sel.value = '';
+                return;
+            }
+            sel.innerHTML = rows.map((row) => {
+                const id = String(row.id || '');
+                const label = String(row.name || 'Untitled outfit').slice(0, 64);
+                return `<option value="${id}">${label}</option>`;
+            }).join('');
+            if (prior && rows.some((r) => String(r.id || '') === prior)) {
+                sel.value = prior;
+            } else {
+                sel.value = String(rows[rows.length - 1].id || '');
+            }
+        }
+
+        function _captureCurrentOutfitSnapshot(nameHint = '') {
+            const outfit = String(document.getElementById('avatarOutfitSelect')?.value || 'casual');
+            const animation = String(document.getElementById('avatarAnimSelect')?.value || 'float3d');
+            const hue = Number(document.getElementById('avatarHueSlider')?.value || 0);
+            const saturation = Number(document.getElementById('avatarSaturationSlider')?.value || 100);
+            const brightness = Number(document.getElementById('avatarBrightnessSlider')?.value || 100);
+            const hairStyle = String(document.getElementById('avatarHairStyleSelect')?.value || 'sleek');
+            const hairHue = Number(document.getElementById('avatarHairHueSlider')?.value || 42);
+            const glow = Number(document.getElementById('avatarGlowSlider')?.value || 45);
+            return {
+                id: `wardrobe-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+                name: String(nameHint || `${outfit}-${new Date().toLocaleTimeString()}`).trim().slice(0, 64),
+                outfit,
+                animation,
+                hue,
+                saturation,
+                brightness,
+                hairStyle,
+                hairHue,
+                glow,
+                created_at: new Date().toISOString()
+            };
+        }
+
+        function _applyOutfitSnapshot(snap) {
+            if (!snap || typeof snap !== 'object') return;
+            const setVal = (id, value) => { const el = document.getElementById(id); if (el) el.value = String(value); };
+            setVal('avatarOutfitSelect', snap.outfit || 'casual');
+            setVal('avatarAnimSelect', snap.animation || 'float3d');
+            setVal('avatarHueSlider', Number.isFinite(Number(snap.hue)) ? snap.hue : 0);
+            setVal('avatarSaturationSlider', Number.isFinite(Number(snap.saturation)) ? snap.saturation : 100);
+            setVal('avatarBrightnessSlider', Number.isFinite(Number(snap.brightness)) ? snap.brightness : 100);
+            setVal('avatarHairStyleSelect', snap.hairStyle || 'sleek');
+            setVal('avatarHairHueSlider', Number.isFinite(Number(snap.hairHue)) ? snap.hairHue : 42);
+            setVal('avatarGlowSlider', Number.isFinite(Number(snap.glow)) ? snap.glow : 45);
+            localStorage.setItem(AVATAR_ACTIVE_MODE_KEY, '3d');
+            avatarState.activeMode = '3d';
+            applyAvatarPresentation();
+        }
+
+        async function saveCurrentAvatarOutfit(announce = false) {
+            const nameInput = document.getElementById('avatarOutfitNameInput');
+            const snapshot = _captureCurrentOutfitSnapshot(String(nameInput?.value || '').trim());
+            const rows = getAvatarWardrobeLibrary();
+            rows.push(snapshot);
+            persistAvatarWardrobeLibrary(rows);
+            if (nameInput) nameInput.value = snapshot.name;
+            await saveAvatarCreativeReference('writing', 'Aurion wardrobe outfit', snapshot);
+            if (announce) addMessage(`Outfit saved: ${snapshot.name}`, 'joi');
+            return snapshot;
+        }
+
+        function applySavedAvatarOutfit(announce = false) {
+            const sel = document.getElementById('avatarSavedOutfitSelect');
+            const selectedId = String(sel?.value || '').trim();
+            const rows = getAvatarWardrobeLibrary();
+            const pick = rows.find((r) => String(r.id || '') === selectedId) || rows[rows.length - 1];
+            if (!pick) {
+                if (announce) addMessage('No saved outfit to apply yet.', 'joi');
+                return null;
+            }
+            _applyOutfitSnapshot(pick);
+            if (announce) addMessage(`Aurion switched to saved outfit: ${pick.name}`, 'joi');
+            return pick;
+        }
+
+        async function aurionDesignOwnOutfit(announce = false) {
+            const outfits = ['casual', 'formal', 'ethereal', 'cyberpunk', 'regal', 'mystic', 'minimal', 'neon', 'warrior'];
+            const hairStyles = ['sleek', 'bangs', 'bob', 'layered', 'wavy', 'ponytail', 'pixie'];
+            const stamp = new Date();
+            const generated = {
+                id: `wardrobe-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+                name: `Aurion Live ${stamp.getHours()}-${String(stamp.getMinutes()).padStart(2, '0')}`,
+                outfit: outfits[Math.floor(Math.random() * outfits.length)],
+                animation: String(document.getElementById('avatarAnimSelect')?.value || 'float3d'),
+                hue: randomBetween(-25, 25),
+                saturation: randomBetween(88, 136),
+                brightness: randomBetween(86, 128),
+                hairStyle: hairStyles[Math.floor(Math.random() * hairStyles.length)],
+                hairHue: randomBetween(26, 54),
+                glow: randomBetween(26, 78),
+                created_at: new Date().toISOString()
+            };
+            _applyOutfitSnapshot(generated);
+            const rows = getAvatarWardrobeLibrary();
+            rows.push(generated);
+            persistAvatarWardrobeLibrary(rows);
+            await saveAvatarCreativeReference('writing', 'Aurion autonomous outfit design', generated);
+            if (announce) addMessage(`Aurion designed and wore: ${generated.name}`, 'joi');
+            return generated;
+        }
+
         function applyRoleplayFromText(text) {
             const value = String(text || '');
             if (!value) return;
@@ -16705,9 +17310,9 @@ HTML_TEMPLATE = """
             }
             const list = models.map((m, i) =>
                 `  ${i + 1}. ${m.name} (${m.size_mb} MB)`
-            ).join('\n');
+            ).join('\\\\n');
             const choice = prompt(
-                'Available 3D models — enter a number to switch:\n\n' + list + '\n\nOr press Cancel to keep current.'
+                'Available 3D models - enter a number to switch:\\\\n\\\\n' + list + '\\\\n\\\\nOr press Cancel to keep current.'
             );
             if (!choice) return;
             const idx = parseInt(choice.trim(), 10) - 1;
@@ -17036,12 +17641,7 @@ HTML_TEMPLATE = """
                 await aurionCreate2DAvatar(announce);
                 return;
             }
-            let use3D = false;
-            if (canUse2D && canUse3D) {
-                use3D = Math.random() < 0.5;
-            } else {
-                use3D = canUse3D;
-            }
+            const use3D = canUse3D || !canUse2D;
             if (use3D) {
                 const pick = threeD[Math.floor(Math.random() * threeD.length)];
                 if (pick && pick.preset) {
@@ -17078,11 +17678,15 @@ HTML_TEMPLATE = """
             if (!force && impulse < threshold) return;
             avatarState.lastDecisionAt = now;
             localStorage.setItem(AVATAR_AUTO_INTERVAL_MS_KEY, String(intervalMs));
+            localStorage.setItem(AVATAR_ACTIVE_MODE_KEY, '3d');
+            avatarState.activeMode = '3d';
             const branch = Math.random();
-            if (branch < 0.33) {
-                await aurionCreate2DAvatar(false);
-            } else if (branch < 0.66) {
+            if (branch < 0.30) {
                 await aurionCreate3DAvatar(false);
+            } else if (branch < 0.58) {
+                await aurionDesignOwnOutfit(false);
+            } else if (branch < 0.82) {
+                applySavedAvatarOutfit(false);
             } else {
                 await aurionChooseOwnAvatar(false);
             }
@@ -17111,7 +17715,7 @@ HTML_TEMPLATE = """
                 const response = await fetch('/api/message', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: text, client_context: buildClientWorldContext() })
+                    body: JSON.stringify(buildClientMessagePayload(text, 'text'))
                 });
                 
                 if (!response.ok) {
@@ -17195,13 +17799,20 @@ HTML_TEMPLATE = """
         }
 
         function toggleProfileSettings() {
-            openAppSettingsDialog();
-            setTimeout(() => {
-                const profileEl = document.getElementById('prefInput');
-                if (profileEl) profileEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }, 200);
-            loadUserProfile();
-            if (window.aurionToast) aurionToast('Profile memory is in App Settings', 'info');
+            const panel = document.getElementById('profileSettings');
+            if (!panel) return;
+            const appModal = document.getElementById('appSettingsModal');
+            const willOpen = !panel.classList.contains('open');
+            if (appModal) appModal.classList.remove('open');
+            panel.classList.toggle('open', willOpen);
+            if (willOpen) {
+                loadUserProfile();
+                setTimeout(() => {
+                    const profileEl = document.getElementById('prefInput');
+                    if (profileEl) profileEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }, 120);
+                if (window.aurionToast) aurionToast('Profile panel opened', 'ok');
+            }
         }
 
         function openChatMergePanel() {
@@ -18472,7 +19083,7 @@ HTML_TEMPLATE = """
                     const response2 = await fetch('/api/message', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ text: data.transcription })
+                        body: JSON.stringify(buildClientMessagePayload(data.transcription, 'text'))
                     });
                     
                     const data2 = await response2.json();
@@ -18732,6 +19343,20 @@ HTML_TEMPLATE = """
 
         async function _loadAurionCharacterModel(modelUrl) {
             if (!modelUrl || typeof THREE === 'undefined' || !THREE.GLTFLoader) return null;
+            const referencePalette = await fetchAurionReferencePalette(false);
+            const toSafeRefHex = (hex, fallbackHex, minLuma) => {
+                try {
+                    const c = new THREE.Color(String(hex || fallbackHex));
+                    const lum = ((c.r * 255) + (c.g * 255) + (c.b * 255)) / 3;
+                    if (!Number.isFinite(lum) || lum < minLuma) return fallbackHex;
+                    return '#' + c.getHexString();
+                } catch (_error) {
+                    return fallbackHex;
+                }
+            };
+            const referenceHairHex = toSafeRefHex(referencePalette?.hair_hex, '#e2c35a', 88);
+            const referenceSkinHex = toSafeRefHex(referencePalette?.skin_hex, '#e0b090', 108);
+            const referenceEyeHex = toSafeRefHex(referencePalette?.eye_hex, '#5fa060', 70);
             return await new Promise((resolve, reject) => {
                 const loader = new THREE.GLTFLoader();
                 loader.load(
@@ -18748,6 +19373,12 @@ HTML_TEMPLATE = """
                             veryDarkSkin: 0,
                             eyeLike: 0
                         };
+                        const possibleBackdropPlanes = [];
+                        const realJiggleParts = {
+                            chest: [],
+                            hair: [],
+                            skirt: []
+                        };
                         sceneRoot.traverse((node) => {
                             if (node && node.isMesh) {
                                 const meshName = String(node.name || '').toLowerCase();
@@ -18755,6 +19386,12 @@ HTML_TEMPLATE = """
                                 const clothingLike = /(shirt|dress|skirt|pants|jeans|shorts|jacket|coat|hoodie|suit|shoe|boot|glove|sock|bra|underwear|gown)/.test(meshName);
                                 const hairLike = /(hair|bang|fringe|pony|bun)/.test(meshName);
                                 const eyeLike = /(eye|iris|pupil|eyeball)/.test(meshName);
+                                if (/(plane|background|backdrop|billboard|screen|card)/.test(meshName)) {
+                                    possibleBackdropPlanes.push(node);
+                                }
+                                if (/(breast|boob|chest|bust)/.test(meshName)) realJiggleParts.chest.push(node);
+                                if (/(hair|bang|fringe|pony|bun|tail)/.test(meshName)) realJiggleParts.hair.push(node);
+                                if (/(skirt|dress|gown|robe|cloak)/.test(meshName)) realJiggleParts.skirt.push(node);
                                 if (skinLike) modelStats.skinLike += 1;
                                 if (clothingLike) modelStats.clothingLike += 1;
                                 if (eyeLike) modelStats.eyeLike += 1;
@@ -18769,6 +19406,10 @@ HTML_TEMPLATE = """
                                         // overrides on untextured materials as a fallback.
                                         mat.side = THREE.DoubleSide;
                                         const hasAlbedoTex = !!mat.map;
+                                        if (hasAlbedoTex && mat.color && typeof mat.color.setRGB === 'function') {
+                                            // Keep textured models visible even when exported with dark multipliers.
+                                            mat.color.setRGB(1, 1, 1);
+                                        }
                                         // Fix completely invisible materials (broken alpha)
                                         if (typeof mat.opacity === 'number' && mat.opacity < 0.05) {
                                             mat.opacity = 1.0;
@@ -18781,6 +19422,20 @@ HTML_TEMPLATE = """
                                         // Clamp over-metallic PBR values that make skin look like chrome
                                         if (typeof mat.metalness === 'number') mat.metalness = Math.min(0.2, Math.max(0.0, mat.metalness));
                                         if (typeof mat.roughness === 'number') mat.roughness = Math.max(0.28, Math.min(0.92, mat.roughness));
+                                        if (hasAlbedoTex && mat.emissive && typeof mat.emissive.setHex === 'function') {
+                                            mat.emissive.setHex(0x1b1628);
+                                            mat.emissiveIntensity = Math.max(0.10, Number(mat.emissiveIntensity || 0));
+                                        }
+                                        if (hasAlbedoTex && skinLike && mat.color && typeof mat.color.lerp === 'function') {
+                                            const refSkin = new THREE.Color(referenceSkinHex);
+                                            mat.color.lerp(refSkin, 0.14);
+                                        } else if (hasAlbedoTex && hairLike && mat.color && typeof mat.color.lerp === 'function') {
+                                            const refHair = new THREE.Color(referenceHairHex);
+                                            mat.color.lerp(refHair, 0.20);
+                                        } else if (hasAlbedoTex && eyeLike && mat.color && typeof mat.color.lerp === 'function') {
+                                            const refEye = new THREE.Color(referenceEyeHex);
+                                            mat.color.lerp(refEye, 0.35);
+                                        }
                                         // Flat-color fallback — only when the material has no diffuse texture
                                         if (!hasAlbedoTex) {
                                             let luminance = 0.0;
@@ -18791,13 +19446,13 @@ HTML_TEMPLATE = """
                                             }
                                             if (mat.color && typeof mat.color.setHex === 'function') {
                                                 if (eyeLike) {
-                                                    mat.color.setHex(0x5fa060); // Aurion green eyes
+                                                    mat.color.setStyle(referenceEyeHex);
                                                 } else if (hairLike) {
-                                                    mat.color.setHex(0xe2c35a); // Aurion blonde
+                                                    mat.color.setStyle(referenceHairHex);
                                                 } else if (clothingLike) {
                                                     mat.color.setHex(0x5a3d8e); // purple
                                                 } else if (skinLike) {
-                                                    mat.color.setHex(0xe0b090); // warm skin
+                                                    mat.color.setStyle(referenceSkinHex);
                                                 } else if (luminance < 0.12) {
                                                     mat.color.setHex(0x7e6ea0);
                                                 }
@@ -18836,7 +19491,8 @@ HTML_TEMPLATE = """
                         const size = box.getSize(new THREE.Vector3());
                         const targetHeight = 2.05;
                         const rawScale = targetHeight / Math.max(0.001, size.y || 0.001);
-                        const scale = Math.max(0.18, Math.min(2.8, rawScale));
+                        // Allow very large imported scenes to scale down far enough.
+                        const scale = Math.max(0.02, Math.min(2.8, rawScale));
                         sceneRoot.scale.setScalar(scale);
                         const scaledBox = new THREE.Box3().setFromObject(holder);
                         const scaledCenter = scaledBox.getCenter(new THREE.Vector3());
@@ -18846,13 +19502,39 @@ HTML_TEMPLATE = """
                         // Face imported avatars toward the camera by default.
                         // Many user-provided assets are authored with opposite forward vectors.
                         sceneRoot.rotation.y = Math.PI;
+                        // Some generated GLBs include giant background planes that can cover the
+                        // entire camera view as a white rectangle. Hide those planes if detected.
+                        const preFramedBox = new THREE.Box3().setFromObject(holder);
+                        const preFramedSize = preFramedBox.getSize(new THREE.Vector3());
+                        const preMaxDim = Math.max(preFramedSize.x, preFramedSize.y, preFramedSize.z, 0.001);
+                        possibleBackdropPlanes.forEach((mesh) => {
+                            try {
+                                if (!mesh || !mesh.isMesh || !mesh.geometry) return;
+                                if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+                                const bb = mesh.geometry.boundingBox;
+                                if (!bb) return;
+                                const sizeV = new THREE.Vector3();
+                                bb.getSize(sizeV);
+                                const sx = Math.abs(sizeV.x * (mesh.scale?.x || 1) * (sceneRoot.scale?.x || 1));
+                                const sy = Math.abs(sizeV.y * (mesh.scale?.y || 1) * (sceneRoot.scale?.y || 1));
+                                const sz = Math.abs(sizeV.z * (mesh.scale?.z || 1) * (sceneRoot.scale?.z || 1));
+                                const dims = [sx, sy, sz].sort((a, b) => a - b);
+                                const thin = dims[0] < (dims[2] * 0.04);
+                                const huge = dims[2] > preMaxDim * 0.72;
+                                if (thin && huge) {
+                                    mesh.visible = false;
+                                    mesh.castShadow = false;
+                                    mesh.receiveShadow = false;
+                                }
+                            } catch (_planeErr) {}
+                        });
                         const framedBox = new THREE.Box3().setFromObject(holder);
                         const framedSize = framedBox.getSize(new THREE.Vector3());
                         const radius = Math.max(0.35, Math.max(framedSize.x, framedSize.y, framedSize.z) * 0.55);
                         const safeHeight = Math.max(0.4, Math.min(4.0, framedSize.y || targetHeight));
-                        const faceTargetY = Math.max(1.0, Math.min(1.95, framedBox.min.y + safeHeight * 0.84));
-                        const faceCamY = Math.max(1.35, Math.min(2.35, framedBox.min.y + safeHeight * 0.92));
-                        const faceCamZ = Math.max(3.0, Math.min(4.8, Math.max(3.0, radius * 2.0)));
+                        const faceTargetY = framedBox.min.y + safeHeight * 0.86;
+                        const faceCamY = faceTargetY + Math.max(0.22, safeHeight * 0.08);
+                        const faceCamZ = Math.max(3.0, Math.min(9.8, Math.max(radius * 2.15, safeHeight * 1.15 + 1.2)));
                         holder.userData._cameraHint = {
                             y: faceCamY,
                             z: faceCamZ
@@ -18860,6 +19542,7 @@ HTML_TEMPLATE = """
                         holder.userData._targetHintY = faceTargetY;
                         holder.userData._faceTimeCamera = { x: 0, y: faceCamY, z: faceCamZ, targetY: faceTargetY };
                         holder.userData._isRealModel = true;
+                        holder.userData._realJiggleParts = realJiggleParts;
                         let mixer = null;
                         if (Array.isArray(gltf.animations) && gltf.animations.length) {
                             mixer = new THREE.AnimationMixer(sceneRoot);
@@ -18886,6 +19569,8 @@ HTML_TEMPLATE = """
             world.aurionGroup = aurionGroup;
             world.avatarMixer = null;
             world.usingRealModel = false;
+            const portraitWrap = document.getElementById('aurionOfflinePortrait');
+            if (portraitWrap) portraitWrap.classList.add('avatar-loaded');
             _ensureJiggle();
             _ensureSquishState(aurionGroup);
             _initHairPhysics(world.scene, new THREE.Vector3(0, 1.88, 0));
@@ -18909,6 +19594,8 @@ HTML_TEMPLATE = """
                     world.aurionGroup = loaded.holder;
                     world.avatarMixer = loaded.mixer || null;
                     world.usingRealModel = true;
+                    const portraitWrap = document.getElementById('aurionOfflinePortrait');
+                    if (portraitWrap) portraitWrap.classList.add('avatar-loaded');
                     if (world.roomGroup) world.roomGroup.visible = true;
                     const hint = loaded.holder.userData ? loaded.holder.userData._cameraHint : null;
                     if (hint) {
@@ -18922,16 +19609,21 @@ HTML_TEMPLATE = """
                     world.warmKey.intensity = Math.max(world.warmKey.intensity, 3.4);
                     world.pinkRim.intensity = Math.max(world.pinkRim.intensity, 1.0);
                     if (world.scene && world.scene.fog) {
-                        world.scene.fog.density = Math.min(world.scene.fog.density || 0.055, 0.012);
+                        world.scene.fog.density = Math.min(world.scene.fog.density || 0.055, 0.006);
                     }
                     if (world.renderer) {
-                        world.renderer.toneMappingExposure = Math.max(world.renderer.toneMappingExposure || 1.15, 1.55);
+                        world.renderer.toneMappingExposure = Math.max(world.renderer.toneMappingExposure || 1.15, 2.05);
                     }
                     if (!world.realModelKeyFill) {
-                        const keyFill = new THREE.DirectionalLight(0xfff2e0, 1.65);
+                        const keyFill = new THREE.DirectionalLight(0xfff6ea, 2.35);
                         keyFill.position.set(0.5, 1.9, 3.8);
                         world.scene.add(keyFill);
                         world.realModelKeyFill = keyFill;
+                    }
+                    if (!world.realModelHemisphereFill) {
+                        const hemi = new THREE.HemisphereLight(0xbcdcff, 0x3a2a22, 1.45);
+                        world.scene.add(hemi);
+                        world.realModelHemisphereFill = hemi;
                     }
                     return;
                 } catch (error) {
@@ -19969,7 +20661,7 @@ HTML_TEMPLATE = """
                 sw.position.set(s * 5, 3, 0); sw.rotation.y = -s * Math.PI / 2; rg.add(sw);
             }
 
-            if (roomKey === 'sleeping' || roomKey === 'dreaming') {
+            if (roomKey === 'sleeping' || roomKey === 'dreaming' || roomKey === 'bedroom') {
                 // Canopy bed
                 const bedM = new THREE.MeshStandardMaterial({ color: 0x2a1440, roughness: 0.8 });
                 const bedFrame = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.3, 3.2), bedM);
@@ -20006,6 +20698,41 @@ HTML_TEMPLATE = """
                     const eq = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.28, 0.18),
                         new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.5 }));
                     eq.position.set(1.4 + dx, 0.95, -3.2); rg.add(eq);
+                }
+            } else if (roomKey === 'kitchen') {
+                const counterMat = new THREE.MeshStandardMaterial({ color: 0x8b6a48, roughness: 0.72, metalness: 0.08 });
+                const counterTop = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.12, 1.2), counterMat);
+                counterTop.position.set(-1.0, 0.95, -3.15); rg.add(counterTop);
+                const counterBase = new THREE.Mesh(new THREE.BoxGeometry(3.1, 0.9, 1.12),
+                    new THREE.MeshStandardMaterial({ color: 0x2b3048, roughness: 0.86 }));
+                counterBase.position.set(-1.0, 0.45, -3.15); rg.add(counterBase);
+                const island = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.95, 0.92),
+                    new THREE.MeshStandardMaterial({ color: 0x454f66, roughness: 0.82 }));
+                island.position.set(1.2, 0.48, -2.3); rg.add(island);
+                const warmStrip = new THREE.Mesh(new THREE.PlaneGeometry(2.8, 0.18),
+                    new THREE.MeshBasicMaterial({ color: 0xffd8a2, opacity: 0.24, transparent: true }));
+                warmStrip.position.set(-1.0, 1.38, -3.7); rg.add(warmStrip);
+            } else if (roomKey === 'outside') {
+                const grass = new THREE.Mesh(
+                    new THREE.PlaneGeometry(16, 16),
+                    new THREE.MeshStandardMaterial({ color: 0x2f5535, roughness: 0.94 })
+                );
+                grass.rotation.x = -Math.PI / 2;
+                grass.position.y = -0.01;
+                rg.add(grass);
+                const skyWall = new THREE.Mesh(
+                    new THREE.SphereGeometry(14, 24, 16),
+                    new THREE.MeshBasicMaterial({ color: 0x162744, side: THREE.BackSide, opacity: 0.76, transparent: true })
+                );
+                skyWall.position.set(0, 2.5, 0);
+                rg.add(skyWall);
+                for (const [x, z] of [[-3.2, -4.4], [3.6, -3.8], [-4.4, -1.6]]) {
+                    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.11, 1.5, 8),
+                        new THREE.MeshStandardMaterial({ color: 0x5b3b22, roughness: 0.9 }));
+                    trunk.position.set(x, 0.75, z); rg.add(trunk);
+                    const crown = new THREE.Mesh(new THREE.SphereGeometry(0.72, 12, 10),
+                        new THREE.MeshStandardMaterial({ color: 0x2f6a3a, roughness: 0.88 }));
+                    crown.position.set(x, 1.65, z); rg.add(crown);
                 }
             } else {
                 // Living room: sofa + table
@@ -20053,7 +20780,7 @@ HTML_TEMPLATE = """
             });
             if (!colorCount) return;
             const avgLum = luminanceSum / colorCount;
-            if (avgLum >= 0.16) return;
+            if (avgLum >= 0.32) return;
 
             avatar.traverse((node) => {
                 if (!node || !node.isMesh || !node.material) return;
@@ -20076,13 +20803,32 @@ HTML_TEMPLATE = """
                         if (hsl.s < 0.15) hsl.s = 0.18;
                         mat.color.setHSL(hsl.h, hsl.s, hsl.l);
                     }
+                    if (mat.emissive && typeof mat.emissive.setHex === 'function') {
+                        mat.emissive.setHex(0x251d35);
+                        if (mat.map) {
+                            // Reuse diffuse texture as emissive boost for very dark GLBs.
+                            mat.emissiveMap = mat.map;
+                            mat.emissiveIntensity = Math.max(0.42, Number(mat.emissiveIntensity || 0));
+                        } else {
+                            mat.emissiveIntensity = Math.max(0.22, Number(mat.emissiveIntensity || 0));
+                        }
+                    }
+                    if (typeof mat.metalness === 'number') {
+                        mat.metalness = Math.min(0.06, Math.max(0.0, mat.metalness));
+                    }
+                    if (typeof mat.roughness === 'number') {
+                        mat.roughness = Math.max(0.45, Math.min(0.98, mat.roughness));
+                    }
                     mat.needsUpdate = true;
                 });
             });
             world.warmKey.intensity = Math.max(4.4, Number(world.warmKey.intensity || 0));
             world.pinkRim.intensity = Math.max(1.4, Number(world.pinkRim.intensity || 0));
+            if (world.callLight) {
+                world.callLight.intensity = Math.max(3.5, Number(world.callLight.intensity || 0));
+            }
             if (world.renderer) {
-                world.renderer.toneMappingExposure = Math.max(1.9, Number(world.renderer.toneMappingExposure || 1.0));
+                world.renderer.toneMappingExposure = Math.max(2.25, Number(world.renderer.toneMappingExposure || 1.0));
             }
         }
 
@@ -20176,6 +20922,49 @@ HTML_TEMPLATE = """
             });
         }
 
+        function _applyRealModelJiggle(frameDt, ag, T, activity) {
+            const parts = ag && ag.userData ? ag.userData._realJiggleParts : null;
+            if (!parts) return;
+            if (!ag.userData._realJiggleState) {
+                ag.userData._realJiggleState = { velY: 0, prevY: Number(ag.position.y || 0), phase: Math.random() * Math.PI * 2 };
+            }
+            const st = ag.userData._realJiggleState;
+            const posY = Number(ag.position.y || 0);
+            const velY = (posY - st.prevY) / Math.max(0.0001, frameDt);
+            st.prevY = posY;
+            st.velY = st.velY * 0.84 + velY * 0.16;
+            const activityBoost = (activity === 'exploring' || activity === 'working') ? 1.35 : 1.0;
+            const danceBoost = (typeof _danceMode !== 'undefined' && _danceMode && _danceMode !== 'idle') ? 1.65 : 1.0;
+            const ampBase = Math.min(1.0, Math.max(0.08, Math.abs(st.velY) * 0.22)) * activityBoost * danceBoost;
+            const phase = T * (3.2 + ampBase * 2.0) + st.phase;
+
+            const applyGroup = (nodes, rotX, rotZ, posYMul, posZMul) => {
+                if (!Array.isArray(nodes)) return;
+                nodes.forEach((n) => {
+                    if (!n || !n.isMesh) return;
+                    if (!n.userData._jiggleBase) {
+                        n.userData._jiggleBase = {
+                            rx: Number(n.rotation.x || 0),
+                            rz: Number(n.rotation.z || 0),
+                            py: Number(n.position.y || 0),
+                            pz: Number(n.position.z || 0)
+                        };
+                    }
+                    const b = n.userData._jiggleBase;
+                    const s1 = Math.sin(phase + (n.id % 7) * 0.11);
+                    const s2 = Math.cos(phase * 0.82 + (n.id % 5) * 0.15);
+                    n.rotation.x = b.rx + s1 * rotX * ampBase;
+                    n.rotation.z = b.rz + s2 * rotZ * ampBase;
+                    n.position.y = b.py + s1 * posYMul * ampBase;
+                    n.position.z = b.pz + s2 * posZMul * ampBase;
+                });
+            };
+
+            applyGroup(parts.chest, 0.11, 0.06, 0.006, 0.012);
+            applyGroup(parts.hair, 0.08, 0.05, 0.010, 0.018);
+            applyGroup(parts.skirt, 0.06, 0.10, 0.004, 0.014);
+        }
+
         function _animateAurionWorld3D() {
             if (!_aurionWorld) return;
             requestAnimationFrame(_animateAurionWorld3D);
@@ -20230,6 +21019,7 @@ HTML_TEMPLATE = """
                 const yawToCamera = Math.atan2(w.camera.position.x - ag.position.x, w.camera.position.z - ag.position.z) + Math.PI;
                 const prevYaw = Number(ag.rotation.y || 0);
                 ag.rotation.y = prevYaw + (yawToCamera - prevYaw) * Math.min(1, frameDt * 8.0);
+                _applyRealModelJiggle(frameDt, ag, T, act);
                 w.camera.lookAt(ag.position.x, lookTargetY, ag.position.z);
                 w.renderer.render(w.scene, w.camera);
                 return;
@@ -20463,6 +21253,8 @@ HTML_TEMPLATE = """
                     const sleep = (d.sleep_autonomy || {});
                     const state = String(sleep.state || 'awake').toLowerCase();
                     const mode  = String(d.mode || '').toLowerCase();
+                    const decorLocation = String(homeState?.decor?.location || '').toLowerCase();
+                    const envRoom = String(homeEnvState?.current_room || '').toLowerCase();
                     let activity = 'idle';
                     let room = 'living_room';
                     if (state === 'sleeping') { activity = 'sleeping'; room = 'sleeping'; }
@@ -20470,6 +21262,19 @@ HTML_TEMPLATE = """
                     else if (mode.includes('lab') || mode.includes('science') || mode.includes('crispr') || mode.includes('work')) { activity = 'working'; room = 'working'; }
                     else if (mode.includes('roam') || mode.includes('explor') || mode.includes('free')) { activity = 'exploring'; room = 'living_room'; }
                     else { activity = 'idle'; room = 'living_room'; }
+                    if (decorLocation === 'science-lab') {
+                        activity = 'working';
+                        room = 'working';
+                    } else if (decorLocation === 'kitchen' || envRoom === 'kitchen') {
+                        room = 'kitchen';
+                    } else if (['yard', 'outside', 'city-center', 'forest-trail', 'coastline', 'garden', 'porch', 'skydeck'].includes(decorLocation)) {
+                        activity = 'exploring';
+                        room = 'outside';
+                    } else if (decorLocation === 'master-bedroom' || decorLocation === 'dream-suite') {
+                        room = 'bedroom';
+                    } else if (envRoom === 'master_bedroom' || envRoom === 'bedroom_2' || envRoom === 'bedroom_3') {
+                        room = 'bedroom';
+                    }
 
                     if (room !== _aurionWorld.currentRoom) {
                         _aurionWorld.currentRoom = room;
@@ -21159,6 +21964,8 @@ HTML_TEMPLATE = """
 
         function openAppSettingsDialog() {
             try {
+                document.getElementById('profileSettings')?.classList.remove('open');
+                document.getElementById('voiceSettings')?.classList.remove('open');
                 document.getElementById('appSettingsModal').classList.add('open');
                 applyAppSettingsUi();
                 applyAppSettingsBehavior();
@@ -21607,6 +22414,66 @@ HTML_TEMPLATE = """
             } catch(e) { if(window.aurionToast) aurionToast('Plex error: '+e.message,'error'); }
         }
 
+        function buildPlexWebUrl() {
+            savePlexLibrarySelections('auto');
+            const token = String(
+                document.getElementById('plexControlTokenInput')?.value
+                || document.getElementById('plexTokenInput')?.value
+                || localStorage.getItem(PLEX_TOKEN_KEY)
+                || ''
+            ).trim();
+            const rawServer = String(
+                document.getElementById('plexControlServerUrlInput')?.value
+                || document.getElementById('plexServerUrlInput')?.value
+                || localStorage.getItem(PLEX_SERVER_URL_KEY)
+                || ''
+            ).trim();
+            const server = normalizePlexServerUrl(rawServer);
+            if (!server) return '';
+            const base = `${server}/web/index.html`;
+            return resolvePlexUrl(base, token);
+        }
+
+        function openPlexWebWindow() {
+            const modal = document.getElementById('plexWebModal');
+            const frame = document.getElementById('plexWebFrame');
+            const input = document.getElementById('plexWebUrlInput');
+            const status = document.getElementById('plexWebStatus');
+            if (!modal || !frame || !input) return;
+            const url = buildPlexWebUrl();
+            if (!url) {
+                if (status) status.textContent = 'Set Plex Remote URL first, then open Plex Web.';
+                addMessage('Set your Plex server URL in Plex Controls first, then open Plex Web.', 'joi');
+                return;
+            }
+            input.value = url;
+            frame.src = url;
+            if (status) status.textContent = 'Plex web loading...';
+            modal.classList.add('open');
+        }
+
+        function reloadPlexWebWindow() {
+            const frame = document.getElementById('plexWebFrame');
+            const input = document.getElementById('plexWebUrlInput');
+            const status = document.getElementById('plexWebStatus');
+            if (!frame || !input) return;
+            const url = String(input.value || '').trim() || buildPlexWebUrl();
+            if (!url) {
+                if (status) status.textContent = 'No Plex URL available yet.';
+                return;
+            }
+            input.value = url;
+            frame.src = url;
+            if (status) status.textContent = 'Plex web refreshed.';
+        }
+
+        function openPlexWebInNewTab() {
+            const input = document.getElementById('plexWebUrlInput');
+            const url = String(input?.value || '').trim() || buildPlexWebUrl();
+            if (!url) return;
+            window.open(url, '_blank', 'noopener,noreferrer');
+        }
+
         async function savePlexControlPanel() {
             const tokenValue = String(document.getElementById('plexControlTokenInput')?.value || '').trim();
             const tokenInput = document.getElementById('plexTokenInput');
@@ -21784,7 +22651,7 @@ HTML_TEMPLATE = """
                     const response = await fetch('/api/message', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ text: content, client_context: buildClientWorldContext() })
+                        body: JSON.stringify(buildClientMessagePayload(content, 'text'))
                     });
                     if (!response.ok) continue;
                     const data = await response.json();
@@ -21847,7 +22714,7 @@ HTML_TEMPLATE = """
                     const response = await fetch('/api/message', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ text: content, client_context: buildClientWorldContext() })
+                        body: JSON.stringify(buildClientMessagePayload(content, 'text'))
                     });
                     if (!response.ok) continue;
                     const data = await response.json();
@@ -22469,7 +23336,7 @@ HTML_TEMPLATE = """
                         const resp = await fetch('/api/message', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ message: msgContent })
+                            body: JSON.stringify(buildClientMessagePayload(msgContent, 'message'))
                         });
                         if (resp.ok) {
                             const data = await resp.json();
@@ -22709,6 +23576,7 @@ HTML_TEMPLATE = """
                 homeState.decor.roamChat = normalizeRoamChatState(decor.roamChat);
                 homeState.decor.worldMobility = normalizeWorldMobility(decor.worldMobility);
                 homeState.decor.activityResume = normalizeActivityResume(decor.activityResume);
+                homeState.decor.simsAutonomy = normalizeSimsAutonomyState(decor.simsAutonomy);
                 homeState.decor.scienceLab = normalizeLabState(decor.scienceLab);
                 homeState.decor.sleepCycle = normalizeSleepCycleState(decor.sleepCycle);
                 const savedCatalog = Array.isArray(decor.catalog) ? decor.catalog.map((item) => String(item || '').trim()).filter(Boolean) : [];
@@ -22872,6 +23740,7 @@ HTML_TEMPLATE = """
             }
             updateWorldDriveState(Date.now());
             aurionAutoManageHome();
+            syncAurionCompanionOnLogin();
             applyHomeDecor();
             simulatePlants();
             renderPlantList();
@@ -24299,6 +25168,23 @@ HTML_TEMPLATE = """
             };
         }
 
+        function normalizeSimsAutonomyState(raw) {
+            const defaults = createDefaultSimsAutonomyState();
+            const source = raw && typeof raw === 'object' ? raw : {};
+            const routineRaw = String(source.routine || defaults.routine).trim().toLowerCase();
+            const routine = ['dynamic', 'grounded', 'explorer'].includes(routineRaw) ? routineRaw : defaults.routine;
+            return {
+                enabled: source.enabled !== false,
+                companionMode: source.companionMode !== false,
+                worldTravelEnabled: source.worldTravelEnabled !== false,
+                routine,
+                lastMoveAt: Math.max(0, Number(source.lastMoveAt) || 0),
+                lastWorldTravelAt: Math.max(0, Number(source.lastWorldTravelAt) || 0),
+                lastLoginSyncAt: Math.max(0, Number(source.lastLoginSyncAt) || 0),
+                stuckRoomEscapes: Math.max(0, Math.min(999, parseInt(source.stuckRoomEscapes, 10) || 0))
+            };
+        }
+
         function normalizeWorldMobility(raw) {
             const defaults = createDefaultWorldMobilityState();
             const source = raw && typeof raw === 'object' ? raw : {};
@@ -24355,9 +25241,11 @@ HTML_TEMPLATE = """
         }
 
         function buildClientWorldContext() {
+            const snapshot = buildClientSceneBuilderSnapshot();
             const mobility = normalizeWorldMobility(homeState.decor.worldMobility);
             const resume = normalizeActivityResume(homeState.decor.activityResume);
             const lab = normalizeLabState(homeState.decor.scienceLab);
+            const kitchen = homeState.kitchen || createDefaultKitchenState();
             const roadLine = mobility.roads.length
                 ? mobility.roads.slice(-3).map((road) => `${road.label} (${road.connections.map((zone) => getZoneLabel(zone)).join(' to ')})`).join('; ')
                 : 'none yet';
@@ -24378,8 +25266,150 @@ HTML_TEMPLATE = """
                 `Roads: ${roadLine}.`,
                 `Vehicles: ${vehicleLine}.`,
                 `Science lab: ${labLine}`,
-                `Latest discovery: ${latestDiscovery}.`
+                `Latest discovery: ${latestDiscovery}.`,
+                `Narrative scene: ${snapshot.narrative.active_scene || 'unset'} | arc: ${snapshot.narrative.active_arc || 'unset'} | coherence: ${snapshot.narrative.coherence_pct || 0}%.`,
+                `Kitchen: profile ${snapshot.kitchen.taste_profile || kitchen.tasteProfile}, drink ${snapshot.kitchen.default_drink || kitchen.drinkPreference}, active meal stage ${snapshot.kitchen.active_meal_stage || 'idle'}.`,
+                `Wardrobe: mode ${snapshot.wardrobe.active_mode || avatarState.activeMode}, outfit ${snapshot.wardrobe.current_outfit || 'casual'}, saved outfits ${snapshot.wardrobe.saved_outfits || 0}.`,
+                `Life registry: ${snapshot.life_registry.active_count || 0} active beings, ecosystem ${snapshot.life_registry.ecosystem_health_pct || 0}%.`,
+                `Autonomy: aurion control ${snapshot.autonomy.aurion_control ? 'on' : 'off'}, avatar ${snapshot.autonomy.avatar ? 'on' : 'off'}, phone ${snapshot.autonomy.phone ? 'on' : 'off'}, voice ${snapshot.autonomy.voice ? 'on' : 'off'}.`
             ].join('\\n');
+        }
+
+        function buildClientSceneBuilderSnapshot() {
+            const decor = homeState?.decor || {};
+            const mobility = normalizeWorldMobility(decor.worldMobility);
+            const resume = normalizeActivityResume(decor.activityResume);
+            const lab = normalizeLabState(decor.scienceLab);
+            const kitchen = homeState?.kitchen || createDefaultKitchenState();
+            const sleep = normalizeSleepCycleState(decor.sleepCycle);
+            const life = sceneBuilderState.lifeRegistry || {};
+            const narrative = sceneBuilderState.narrative || {};
+            const worldEngine = sceneBuilderState.worldEngine || {};
+            const env = sceneBuilderState.lastHomeEnvironment || homeEnvState || {};
+            const wardrobeLibrary = getAvatarWardrobeLibrary();
+            const currentOutfit = String(document.getElementById('avatarOutfitSelect')?.value || localStorage.getItem(AVATAR_OUTFIT_KEY) || 'casual');
+            const activeMeal = kitchen.activeMeal && typeof kitchen.activeMeal === 'object' ? kitchen.activeMeal : null;
+            const lowPantry = Array.isArray(kitchen.pantry)
+                ? kitchen.pantry.filter((item) => Number(item?.qty || 0) <= 2).slice(0, 8).map((item) => ({ key: item.key, qty: Number(item.qty || 0), unit: item.unit || '' }))
+                : [];
+            const plants = Array.isArray(homeState?.plants) ? homeState.plants.slice(-16).map((plant) => ({
+                id: plant.id || '',
+                type: plant.type || '',
+                name: plant.name || '',
+                health: Number(plant.health ?? 0),
+                water: Number(plant.water ?? 0),
+                growth: Number(plant.growth ?? 0),
+                location: plant.location || ''
+            })) : [];
+            const entities = Array.isArray(life.entities) ? life.entities.filter((e) => e && e.alive !== false).slice(-16) : [];
+            return {
+                captured_at: new Date().toISOString(),
+                autonomy: {
+                    aurion_control: decor.aurionControl !== false,
+                    roam_mode: String(decor.roamMode || 'free'),
+                    avatar: avatarState.autonomyEnabled !== false,
+                    phone: phoneLinkState.autonomyEnabled !== false,
+                    voice: voiceAutonomyState.enabled !== false,
+                    direct_link: decor.directLinkEnabled !== false && decor.alwaysConnected !== false
+                },
+                narrative: {
+                    active_scene: String(narrative.active_scene || ''),
+                    active_arc: String(narrative.active_arc || ''),
+                    dominant_motif: String(narrative.dominant_motif || ''),
+                    arc_progress_pct: Number(narrative.arc_progress_pct || 0),
+                    coherence_pct: Number(narrative.story_coherence_pct || 0),
+                    tension: Number(narrative.relationship_tension || 0),
+                    branches_open: Number(narrative.available_branches || 0),
+                    branches_resolved: Number(narrative.resolved_branches || 0),
+                    consequence_threads: Array.isArray(narrative.consequence_threads) ? narrative.consequence_threads.slice(-8) : [],
+                    dialogue_options: Array.isArray(sceneBuilderState.narrativeDialogue) ? sceneBuilderState.narrativeDialogue.slice(0, 12) : []
+                },
+                world_engine: {
+                    content_density: worldEngine.content_density || {},
+                    rendering_pipeline: worldEngine.rendering_pipeline || {},
+                    asset_pipelines: worldEngine.asset_pipelines || {},
+                    dynamic_physics_engine: worldEngine.dynamic_physics_engine || {},
+                    audio_engine: worldEngine.audio_engine || {},
+                    ux_polish: worldEngine.ux_polish || {}
+                },
+                home_environment: {
+                    location: {
+                        city: String(env.location?.city || homeEnvState.location?.city || ''),
+                        lat: Number(env.location?.lat || homeEnvState.location?.lat || 0),
+                        lon: Number(env.location?.lon || homeEnvState.location?.lon || 0)
+                    },
+                    current_room: String(env.current_room || homeEnvState.current_room || ''),
+                    current_level: String(env.current_level || homeEnvState.current_level || ''),
+                    weather: env.weather || homeEnvState.weather || {},
+                    solar: env.solar || homeEnvState.solar || {},
+                    sensory: env.sensory || homeEnvState.sensory || {},
+                    physics: env.physics || homeEnvState.physics || {},
+                    physiology: env.physiology || homeEnvState.physiology || {},
+                    harmony: env.harmony || homeEnvState.harmony || {},
+                    garden_env: env.garden || homeEnvState.garden || {},
+                    sleep_autonomy: env.sleep_autonomy || homeEnvState.sleep_autonomy || {}
+                },
+                continuity: {
+                    world_patience: Number(decor.worldPatience || 100),
+                    activity_resume: resume,
+                    world_mobility: {
+                        autonomous: mobility.autonomous !== false,
+                        roads: mobility.roads.slice(-12),
+                        vehicles: mobility.vehicles.slice(-12),
+                        active_drive: mobility.activeDrive || null,
+                        drive_history: mobility.driveHistory.slice(-12)
+                    }
+                },
+                kitchen: {
+                    taste_profile: String(kitchen.tasteProfile || ''),
+                    default_drink: String(kitchen.drinkPreference || ''),
+                    stocked: kitchen.stocked !== false,
+                    auto_manage: kitchen.autoManage !== false,
+                    current_dish: String(kitchen.currentDish || ''),
+                    active_meal_stage: activeMeal ? String(activeMeal.stage || '') : '',
+                    active_meal_name: activeMeal ? String(activeMeal.name || '') : '',
+                    pantry_low_items: lowPantry
+                },
+                wardrobe: {
+                    active_mode: String(avatarState.activeMode || '3d'),
+                    current_outfit: currentOutfit,
+                    saved_outfits: wardrobeLibrary.length,
+                    outfit_names: wardrobeLibrary.slice(-20).map((item) => String(item?.name || '')).filter(Boolean)
+                },
+                science_lab: {
+                    focus_area: String(lab.focusArea || 'all'),
+                    total_experiments: Number(lab.totalExperiments || 0),
+                    total_discoveries: Number(lab.totalDiscoveries || 0),
+                    active_experiment: lab.activeExperiment || null,
+                    recent_discoveries: Array.isArray(lab.discoveries) ? lab.discoveries.slice(-10) : []
+                },
+                garden: {
+                    plants_total: plants.length,
+                    plants
+                },
+                life_registry: {
+                    active_count: Number(life.active_count || 0),
+                    total_created: Number(life.total_created || 0),
+                    ecosystem_health_pct: Number(life.ecosystem_health || 100),
+                    entities
+                },
+                sleep_cycle: {
+                    state: String(sleep.state || 'awake'),
+                    energy: Number(sleep.energy || 0),
+                    sleep_drive: Number(sleep.sleepDrive || 0),
+                    current_dream: String(sleep.currentDream || ''),
+                    bedroom: sleep.bedroom || {}
+                }
+            };
+        }
+
+        function buildClientMessagePayload(content, fieldName = 'text') {
+            const payload = {
+                client_context: buildClientWorldContext(),
+                client_scene_snapshot: buildClientSceneBuilderSnapshot()
+            };
+            payload[String(fieldName || 'text')] = String(content || '');
+            return payload;
         }
 
         function saveAurionActivityState(activity, options = {}) {
@@ -24963,7 +25993,7 @@ HTML_TEMPLATE = """
         }
 
         function getWorldDriveLocations() {
-            const pool = new Set(['home', 'yard', 'kitchen', 'porch', 'garden', 'skydeck', 'master-bedroom', 'dream-suite']);
+            const pool = new Set(['home', 'yard', 'kitchen', 'porch', 'garden', 'skydeck', 'outside', 'master-bedroom', 'dream-suite', 'science-lab', 'city-center', 'forest-trail', 'coastline']);
             (homeState.decor.houseAdditions || []).forEach((item) => {
                 if (item?.zoneKey) pool.add(String(item.zoneKey));
             });
@@ -25066,6 +26096,10 @@ HTML_TEMPLATE = """
             mobility.lastDriveAt = now;
             mobility.activeDrive = null;
             homeState.decor.worldMobility = mobility;
+            const simsOnArrival = normalizeSimsAutonomyState(homeState.decor.simsAutonomy);
+            simsOnArrival.lastMoveAt = now;
+            simsOnArrival.lastWorldTravelAt = now;
+            homeState.decor.simsAutonomy = simsOnArrival;
             saveAurionActivityState(`arrived in ${getZoneLabel(homeState.decor.location)}`, {
                 location: homeState.decor.location,
                 source: 'world-drive',
@@ -25124,6 +26158,9 @@ HTML_TEMPLATE = """
             vehicle.lastDrivenAt = now;
             refreshed.lastDriveAt = now;
             homeState.decor.worldMobility = refreshed;
+            const simsOnDrive = normalizeSimsAutonomyState(homeState.decor.simsAutonomy);
+            simsOnDrive.lastWorldTravelAt = now;
+            homeState.decor.simsAutonomy = simsOnDrive;
             saveAurionActivityState(`driving ${vehicle.label}`, {
                 location: current,
                 source: 'world-drive',
@@ -25380,9 +26417,9 @@ HTML_TEMPLATE = """
                 return (homeState.decor.houseAdditions || []).some((item) => item.zoneKey === 'dream-suite') ? 'dream-suite' : 'master-bedroom';
             }
             const freeRoamZones = dayBias
-                ? ['yard', 'garden', 'porch', 'studio', 'library', 'kitchen', 'home', 'skydeck', 'master-bedroom', 'dream-suite'].concat(customZones)
-                : ['home', 'library', 'studio', 'kitchen', 'porch', 'skydeck', 'master-bedroom', 'dream-suite'].concat(customZones.filter((zone) => !isOutdoorLocation(zone)));
-            const guidedZones = dayBias ? ['yard', 'kitchen', 'home', 'master-bedroom'].concat(customZones.slice(0, 2)) : ['home', 'kitchen', 'master-bedroom', 'dream-suite'].concat(customZones.filter((zone) => !isOutdoorLocation(zone)).slice(0, 2));
+                ? ['yard', 'garden', 'porch', 'outside', 'studio', 'library', 'kitchen', 'science-lab', 'home', 'skydeck', 'city-center', 'forest-trail', 'coastline', 'master-bedroom', 'dream-suite'].concat(customZones)
+                : ['home', 'library', 'studio', 'kitchen', 'science-lab', 'porch', 'outside', 'skydeck', 'city-center', 'master-bedroom', 'dream-suite'].concat(customZones.filter((zone) => !isOutdoorLocation(zone)));
+            const guidedZones = dayBias ? ['yard', 'outside', 'kitchen', 'science-lab', 'home', 'city-center', 'master-bedroom'].concat(customZones.slice(0, 2)) : ['home', 'kitchen', 'science-lab', 'master-bedroom', 'dream-suite'].concat(customZones.filter((zone) => !isOutdoorLocation(zone)).slice(0, 2));
             const pool = homeState.decor.roamMode === 'guided' ? guidedZones : freeRoamZones;
             const current = String(homeState.decor.location || 'home');
             const filtered = pool.filter((zone) => zone !== current);
@@ -25409,7 +26446,7 @@ HTML_TEMPLATE = """
             const key = String(location || '').toLowerCase();
             const custom = getCustomZoneDefinitions().find((zone) => zone.key === key);
             if (custom) return custom.outdoor === true;
-            return ['yard', 'garden', 'porch', 'skydeck'].includes(key);
+            return ['yard', 'garden', 'porch', 'skydeck', 'outside', 'city-center', 'forest-trail', 'coastline'].includes(key);
         }
 
         function formatLuciaAge(ageMonths) {
@@ -25799,6 +26836,54 @@ HTML_TEMPLATE = """
             aurionAutonomousPhoneTick(false, 'access');
         }
 
+        function syncAurionCompanionOnLogin() {
+            const now = Date.now();
+            const sleepCycle = normalizeSleepCycleState(homeState.decor.sleepCycle);
+            const sims = normalizeSimsAutonomyState(homeState.decor.simsAutonomy);
+            const mobility = normalizeWorldMobility(homeState.decor.worldMobility);
+            const currentLocation = String(homeState.decor.location || 'home').toLowerCase();
+            const roomIsIsolated = ['master-bedroom', 'master_bedroom', 'dream-suite', 'bedroom_2', 'bedroom_3'].includes(currentLocation);
+            let moved = false;
+
+            if (sims.enabled && sims.companionMode && !mobility.activeDrive && sleepCycle.state === 'awake' && roomIsIsolated) {
+                const resume = normalizeActivityResume(homeState.decor.activityResume);
+                const resumeLocation = String(resume.location || '').trim();
+                const destination = (resume.canResume && resumeLocation && resumeLocation !== currentLocation)
+                    ? resumeLocation
+                    : chooseAurionDestination();
+                if (destination && destination !== currentLocation) {
+                    homeState.decor.location = destination;
+                    moved = true;
+                    saveAurionActivityState('rejoining with you', {
+                        location: destination,
+                        source: 'login-sync',
+                        details: `Aurion synchronized to ${getZoneLabel(destination)} right after login so continuity stays shared.`,
+                        canResume: true
+                    });
+                }
+            }
+
+            homeState.decor.roamChat = normalizeRoamChatState({
+                ...(homeState.decor.roamChat || {}),
+                enabled: true,
+                followLocation: true,
+                minimized: false,
+                pinnedZone: String(homeState.decor.location || 'home')
+            });
+            sims.lastLoginSyncAt = now;
+            if (moved) {
+                sims.lastMoveAt = now;
+                sims.stuckRoomEscapes = Number(sims.stuckRoomEscapes || 0) + 1;
+                appendHomeEntry({
+                    type: 'message',
+                    author: 'Aurion',
+                    text: `Aurion relinked with you in ${getZoneLabel(homeState.decor.location)} so she is never stranded in a separate room at login.`,
+                    timestamp: new Date().toLocaleString()
+                });
+            }
+            homeState.decor.simsAutonomy = sims;
+        }
+
         let roamChatDrag = null;
         function renderRoamingChatDock() {
             const dock = document.getElementById('aurionRoamChatDock');
@@ -26033,6 +27118,7 @@ HTML_TEMPLATE = """
             const userAway = isUserAwayFromHomeRuntime(10);
             const sleepCycle = aurionSleepAutonomyTick(now, userAway) || normalizeSleepCycleState(homeState.decor.sleepCycle);
             const sleepState = String(sleepCycle.state || 'awake');
+            const simsAutonomy = normalizeSimsAutonomyState(homeState.decor.simsAutonomy);
             updateWorldDriveState(now);
             const activeDriveNow = normalizeWorldMobility(homeState.decor.worldMobility).activeDrive;
             if (sleepState === 'sleeping' || sleepState === 'dreaming') {
@@ -26071,6 +27157,9 @@ HTML_TEMPLATE = """
             if (currentLocation !== previousLocation && isOutdoorLocation(currentLocation)) {
                 loadOsmLayoutImagery(true);
                 loadNasaSkyImagery(true);
+            }
+            if (currentLocation !== previousLocation) {
+                simsAutonomy.lastMoveAt = now;
             }
             if (homeState.plants.length) {
                 const dryPlants = homeState.plants.filter((plant) => plant.water < 24);
@@ -26134,6 +27223,34 @@ HTML_TEMPLATE = """
                     aurionDriveWorldNow(false);
                 }
             }
+            const refreshedMobility = normalizeWorldMobility(homeState.decor.worldMobility);
+            if (simsAutonomy.enabled && simsAutonomy.worldTravelEnabled && refreshedMobility.autonomous && !refreshedMobility.activeDrive) {
+                const lastTravelAt = Number(simsAutonomy.lastWorldTravelAt || 0);
+                const lastMoveAt = Number(simsAutonomy.lastMoveAt || 0);
+                const travelCooldown = userAway ? 18 * 60 * 1000 : 28 * 60 * 1000;
+                const moveCooldown = userAway ? 9 * 60 * 1000 : 14 * 60 * 1000;
+                if (now - lastTravelAt > travelCooldown && refreshedMobility.roads.length && refreshedMobility.vehicles.length && Math.random() < 0.52) {
+                    aurionDriveWorldNow(false);
+                    simsAutonomy.lastWorldTravelAt = now;
+                } else if (now - lastMoveAt > moveCooldown && sleepState === 'awake' && Math.random() < (userAway ? 0.68 : 0.42)) {
+                    const destination = chooseAurionDestination();
+                    if (destination && destination !== String(homeState.decor.location || 'home')) {
+                        homeState.decor.location = destination;
+                        simsAutonomy.lastMoveAt = now;
+                        if (isOutdoorLocation(destination)) {
+                            loadOsmLayoutImagery(true);
+                            loadNasaSkyImagery(true);
+                        }
+                        saveAurionActivityState(`traveling through ${getZoneLabel(destination)}`, {
+                            location: destination,
+                            source: 'sims-autonomy',
+                            details: `Aurion chose ${getZoneLabel(destination)} as her next world stop.`,
+                            canResume: true
+                        });
+                    }
+                }
+            }
+            homeState.decor.simsAutonomy = simsAutonomy;
             updateLabAutoTick(now);
             // Refresh new system panels every ~5 minutes
             if (!window._lastNewPanelRefresh || now - window._lastNewPanelRefresh > 5 * 60 * 1000) {
@@ -28756,9 +29873,17 @@ HTML_TEMPLATE = """
             setVrStatus('VR portal closed.');
         }
 
+        function openModal(modalId) {
+            const modal = document.getElementById(modalId);
+            if (!modal) return;
+            modal.classList.add('open');
+        }
+
         function closeModal(modalId) {
             if (modalId === 'musicModal') return;
-            document.getElementById(modalId).classList.remove('open');
+            const modal = document.getElementById(modalId);
+            if (!modal) return;
+            modal.classList.remove('open');
         }
 
         // Close modal when clicking outside
@@ -29080,7 +30205,7 @@ HTML_TEMPLATE = """
         applyAppSettingsUi();
         applyAppSettingsBehavior();
         enableRealtimeVideoSurface().catch(() => {});
-        // Show 2D portrait immediately, then start 3D world in background for when a real model is uploaded
+        // Keep 3D as the default mode; preload 2D portrait only as fallback.
         initAurion2DPortrait().catch(() => {});
         setTimeout(() => initAurionWorld3D(), 400);
         applyVoiceAutonomyUi();
@@ -29376,6 +30501,13 @@ HTML_TEMPLATE = """
             location: { city: 'Toledo, OH', lat: 41.5, lon: -83.7 },
         };
         window.homeEnvState = homeEnvState;
+        let sceneBuilderState = {
+            worldEngine: null,
+            narrative: null,
+            narrativeDialogue: [],
+            lifeRegistry: null,
+            lastHomeEnvironment: null
+        };
 
         const _HOME_ROOM_DESCS = {
             living_room: 'Open living room with stone fireplace, plush seating, and large windows.',
@@ -29418,6 +30550,7 @@ HTML_TEMPLATE = """
         function renderHomeEnvironment(data) {
             if (!data) return;
             const h = data.home || data;
+            sceneBuilderState.lastHomeEnvironment = h;
             // Merge into state
             Object.assign(homeEnvState, {
                 thermostat_set_f: h.thermostat_set_f || homeEnvState.thermostat_set_f,
@@ -29746,6 +30879,21 @@ HTML_TEMPLATE = """
           const d = await resp.json();
           if (!d.success) return;
           const reg = d.registry || {};
+          sceneBuilderState.lifeRegistry = {
+            active_count: Number(reg.active_count || 0),
+            total_created: Number(reg.total_created || 0),
+            ecosystem_health: Number(reg.ecosystem_health || 100),
+            active_vision_entity_id: reg.active_vision_entity_id || '',
+            entities: Array.isArray(reg.entities) ? reg.entities.slice(-18).map((e) => ({
+              id: e.id || '',
+              name: e.name || '',
+              species: e.species || '',
+              location: e.location || '',
+              health: Number(e.health || 0),
+              age_days: Number(e.age_days || 0),
+              alive: e.alive !== false
+            })) : []
+          };
           const el_active = document.getElementById('lifeActiveCount');
           const el_total  = document.getElementById('lifeTotalCount');
           const el_eco    = document.getElementById('lifeEcoHealth');
@@ -29803,6 +30951,7 @@ HTML_TEMPLATE = """
 
         function updateWorldEngineDisplay(we) {
           if (!we) return;
+          sceneBuilderState.worldEngine = we;
           const cd = we.content_density || {};
           const bar = document.getElementById('weDensityBar');
           if (bar) bar.style.width = (cd.density_pct || 0) + '%';
@@ -29858,6 +31007,7 @@ HTML_TEMPLATE = """
 
         function updateNarrativeDisplay(ns) {
           if (!ns) return;
+          sceneBuilderState.narrative = ns;
           const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
           const setWidth = (id, pct) => { const el = document.getElementById(id); if (el) el.style.width = Math.min(100, pct || 0) + '%'; };
           setText('narrSceneLabel',  ns.active_scene  || 'morning stillness');
@@ -29881,6 +31031,13 @@ HTML_TEMPLATE = """
           if (!resp) return;
           const d = await resp.json();
           if (!d.success) return;
+          sceneBuilderState.narrativeDialogue = Array.isArray(d.dialogue_nodes)
+            ? d.dialogue_nodes.slice(0, 16).map((node) => ({
+                id: String(node?.id || ''),
+                text: String(node?.text || ''),
+                mood: String(node?.mood || '')
+              }))
+            : [];
           const listEl = document.getElementById('narrDialogueList');
           if (!listEl) return;
           listEl.innerHTML = '';
@@ -30031,9 +31188,28 @@ HTML_TEMPLATE = """
                     const rName = _HOME_ROOM_NAMES[roomId] || roomId;
                     const rDesc = _HOME_ROOM_DESCS[roomId] || '';
                     const rd = document.getElementById('currentRoomDisplay');
-                    if (rd) rd.textContent = `ðŸ“ ${rName} (${d.current_level} level)`;
+                    if (rd) rd.textContent = `📍 ${rName} (${d.current_level} level)`;
                     const rdc = document.getElementById('currentRoomDesc');
                     if (rdc) rdc.textContent = rDesc;
+                    let locationHint = 'home';
+                    if (roomId === 'kitchen') {
+                        locationHint = 'kitchen';
+                    } else if (roomId === 'master_bedroom' || roomId === 'bedroom_2' || roomId === 'bedroom_3' || roomId === 'hallway' || roomId === 'bathroom_2') {
+                        locationHint = (homeState.decor.houseAdditions || []).some((item) => String(item?.zoneKey || '') === 'dream-suite')
+                            ? 'dream-suite'
+                            : 'home';
+                    } else if (roomId === 'utility_room' || roomId === 'foyer' || roomId === 'living_room' || roomId === 'dining_room' || roomId === 'bathroom_1') {
+                        locationHint = 'home';
+                    }
+                    homeState.decor.location = locationHint;
+                    saveAurionActivityState(`with you in ${rName}`, {
+                        location: locationHint,
+                        source: 'room-nav',
+                        details: `Aurion moved with you into ${rName}.`,
+                        canResume: true
+                    });
+                    persistHomeState();
+                    applyHomeDecor();
                 }
             }).catch(() => {});
         }
@@ -31981,9 +33157,44 @@ def _is_twitch_channel(channel_value: str) -> bool:
 
 def _twitch_receive_config(override_token: str = "", override_username: str = "", override_channel: str = ""):
     app_phone = app_state.get("phone_settings", {}) or {}
-    token = str(override_token or "").strip() or str(app_phone.get("twitch_oauth_token", "")).strip() or str(os.getenv("AURION_TWITCH_OAUTH_TOKEN", "")).strip()
-    username = str(override_username or "").strip() or str(app_phone.get("twitch_bot_username", "")).strip() or str(os.getenv("AURION_TWITCH_BOT_USERNAME", "")).strip()
-    channel = str(override_channel or "").strip() or str(app_phone.get("twitch_channel", "")).strip() or str(os.getenv("AURION_TWITCH_CHANNEL", "")).strip()
+    file_cfg = _load_twitch_receive_config_from_downloads()
+
+    token = str(override_token or "").strip()
+    if not token:
+        token = str(app_phone.get("twitch_oauth_token", "")).strip()
+    if not token:
+        token = str(os.getenv("AURION_TWITCH_OAUTH_TOKEN", "")).strip()
+    if not token:
+        for key in ("TWITCH_OAUTH_TOKEN", "AURION_TWITCH_OAUTH_TOKEN", "twitch_oauth_token", "oauth_token", "oauth"):
+            value = str(file_cfg.get(key, "")).strip()
+            if value:
+                token = value
+                break
+
+    username = str(override_username or "").strip()
+    if not username:
+        username = str(app_phone.get("twitch_bot_username", "")).strip()
+    if not username:
+        username = str(os.getenv("AURION_TWITCH_BOT_USERNAME", "")).strip()
+    if not username:
+        for key in ("TWITCH_BOT_USERNAME", "AURION_TWITCH_BOT_USERNAME", "twitch_bot_username", "bot_username", "username"):
+            value = str(file_cfg.get(key, "")).strip()
+            if value:
+                username = value
+                break
+
+    channel = str(override_channel or "").strip()
+    if not channel:
+        channel = str(app_phone.get("twitch_channel", "")).strip()
+    if not channel:
+        channel = str(os.getenv("AURION_TWITCH_CHANNEL", "")).strip()
+    if not channel:
+        for key in ("TWITCH_CHANNEL", "AURION_TWITCH_CHANNEL", "twitch_channel", "channel", "channel_name"):
+            value = str(file_cfg.get(key, "")).strip()
+            if value:
+                channel = value
+                break
+
     return _normalize_twitch_oauth(token), username.lower(), channel.lower().lstrip("#")
 
 def _twitch_receive_is_configured(override_token: str = "", override_username: str = "", override_channel: str = "") -> bool:
@@ -34773,6 +35984,203 @@ def sync_pull():
         app_state["sync_settings"] = settings
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route('/api/bridge/unreal/state', methods=['GET'])
+def unreal_bridge_state():
+    try:
+        home = dict(app_state.get("home_environment", {}) or {})
+        world_continuity = dict(app_state.get("world_continuity", {}) or {})
+        science_lab = dict(app_state.get("science_lab", {}) or {})
+        cognition = dict(app_state.get("cognition", {}) or {})
+        visual = dict(app_state.get("visual_perception", {}) or {})
+        media = dict(app_state.get("media_perception", {}) or {})
+        world_audio = dict(app_state.get("world_audio_perception", {}) or {})
+        sync_settings = _sanitize_sync_settings(app_state.get("sync_settings", {}))
+        bridge = dict(app_state.get("unreal_bridge", {}) or {})
+        bridge["last_state_pull_at"] = datetime.utcnow().isoformat()
+        bridge["status"] = "state_served"
+        app_state["unreal_bridge"] = bridge
+        return jsonify({
+            "success": True,
+            "bridge_version": 1,
+            "generated_at": datetime.utcnow().isoformat(),
+            "aurion": {
+                "emotion": str(app_state.get("current_emotion", "GRATEFUL")),
+                "mode": str(app_state.get("current_mode", "companion")),
+                "room": str(home.get("current_room", "living_room")),
+                "level": str(home.get("current_level", "lower")),
+                "drive_state": world_continuity.get("active_drive"),
+                "world_mobility": world_continuity.get("world_mobility")
+            },
+            "perception": {
+                "visual": visual,
+                "media_audio": media,
+                "world_audio": world_audio
+            },
+            "world": {
+                "home_environment": home,
+                "science_lab": science_lab,
+                "world_continuity": world_continuity
+            },
+            "cognition": {
+                "state": cognition,
+                "memory_count": int(memory.get_interaction_count())
+            },
+            "sync": {
+                "enabled": bool(sync_settings.get("enabled")),
+                "status": str(sync_settings.get("last_sync_status", "idle")),
+                "last_pull_at": sync_settings.get("last_pull_at"),
+                "last_push_at": sync_settings.get("last_push_at"),
+                "last_remote_pushed_at": sync_settings.get("last_remote_pushed_at"),
+                "last_conflict": sync_settings.get("last_conflict", "")
+            }
+        })
+    except Exception as e:
+        print(f"[Unreal Bridge State Error] {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/bridge/unreal/manifest', methods=['GET'])
+def unreal_bridge_manifest():
+    try:
+        base = str(request.url_root or "http://127.0.0.1:5000").rstrip("/")
+        sync_settings = _sanitize_sync_settings(app_state.get("sync_settings", {}))
+        return jsonify({
+            "success": True,
+            "bridge_version": 1,
+            "generated_at": datetime.utcnow().isoformat(),
+            "base_url": base,
+            "endpoints": {
+                "state": f"{base}/api/bridge/unreal/state",
+                "telemetry": f"{base}/api/bridge/unreal/telemetry",
+                "message": f"{base}/api/message",
+                "sync_settings": f"{base}/api/sync/settings"
+            },
+            "sync": {
+                "enabled": bool(sync_settings.get("enabled")),
+                "device_id": str(sync_settings.get("device_id", "aurion-device")),
+                "last_status": str(sync_settings.get("last_sync_status", "idle"))
+            }
+        })
+    except Exception as e:
+        print(f"[Unreal Bridge Manifest Error] {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+def _push_state_to_unreal():
+    """Push Aurion's live state to Unreal Engine via the Remote Control API (port 30010).
+    Discovers BP_AurionBridge actor path, then sets its Blueprint variables."""
+    try:
+        import urllib.request as _urllib_req, json as _json_mod
+        rc_base = "http://127.0.0.1:30010"
+
+        # --- 1. Discover the bridge actor path ---
+        search_url = f"{rc_base}/remote/search/actors"
+        search_body = _json_mod.dumps({"Query": "BP_AurionBridge", "Types": ["Actor"]}).encode()
+        try:
+            req = _urllib_req.Request(search_url, data=search_body,
+                                      headers={"Content-Type": "application/json"}, method="PUT")
+            with _urllib_req.urlopen(req, timeout=1.5) as r:
+                found = _json_mod.loads(r.read()).get("results") or []
+        except Exception:
+            found = []
+
+        if not found:
+            app_state["unreal_bridge"]["rc_status"] = "actor_not_found"
+            return False
+
+        actor_path = found[0].get("path") or ""
+        app_state["unreal_bridge"]["rc_actor_path"] = actor_path
+
+        # --- 2. Build state payload from live Aurion state ---
+        cog = dict(app_state.get("cognition") or {})
+        world = dict(app_state.get("world_engine") or {})
+        mood_raw = cog.get("current_mood") or cog.get("emotional_state") or {}
+        emotion = str(mood_raw.get("dominant", "neutral") if isinstance(mood_raw, dict) else mood_raw)[:40]
+        room = str(world.get("current_room") or world.get("active_scene") or "bedroom")[:80]
+        mood_val = float(cog.get("mood_score") or cog.get("valence") or 0.5)
+        energy_val = float(cog.get("energy") or cog.get("arousal") or 0.5)
+        is_talking = bool(cog.get("is_speaking") or cog.get("speaking") or False)
+
+        props = [
+            ("CurrentEmotion", {"CurrentEmotion": emotion}),
+            ("CurrentRoom", {"CurrentRoom": room}),
+            ("MoodScore", {"MoodScore": round(mood_val, 4)}),
+            ("EnergyLevel", {"EnergyLevel": round(energy_val, 4)}),
+            ("IsTalking", {"IsTalking": is_talking}),
+        ]
+
+        prop_url = f"{rc_base}/remote/object/property"
+        ok_count = 0
+        for prop_name, prop_val in props:
+            body = _json_mod.dumps({
+                "objectPath": actor_path,
+                "propertyName": prop_name,
+                "propertyValue": prop_val,
+                "access": "WRITE_ACCESS"
+            }).encode()
+            try:
+                req = _urllib_req.Request(prop_url, data=body,
+                                          headers={"Content-Type": "application/json"}, method="PUT")
+                with _urllib_req.urlopen(req, timeout=1.0) as r:
+                    r.read()
+                ok_count += 1
+            except Exception:
+                pass  # property may not exist yet — Blueprint variables must be added first
+
+        app_state["unreal_bridge"]["rc_status"] = f"pushed_{ok_count}/{len(props)}"
+        app_state["unreal_bridge"]["rc_last_push_at"] = datetime.utcnow().isoformat()
+        return ok_count > 0
+
+    except Exception as e:
+        app_state.get("unreal_bridge", {})["rc_status"] = f"error:{e}"
+        return False
+
+
+def _unreal_rc_push_loop():
+    """Background thread: push Aurion state to Unreal every 1.5s."""
+    import time as _time
+    while True:
+        try:
+            _push_state_to_unreal()
+        except Exception:
+            pass
+        _time.sleep(1.5)
+
+
+# Start the Remote Control push thread (daemon — exits with process)
+_rc_push_thread = threading.Thread(target=_unreal_rc_push_loop, daemon=True, name="UnrealRCPush")
+_rc_push_thread.start()
+
+
+@app.route('/api/bridge/unreal/push', methods=['POST'])
+def unreal_bridge_push():
+    """Manually trigger an immediate state push to Unreal via Remote Control API."""
+    try:
+        success = _push_state_to_unreal()
+        bridge = dict(app_state.get("unreal_bridge", {}) or {})
+        return jsonify({"success": success, "rc_status": bridge.get("rc_status"), "bridge": bridge})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/bridge/unreal/telemetry', methods=['POST'])
+def unreal_bridge_telemetry():
+    try:
+        payload = request.json or {}
+        bridge = dict(app_state.get("unreal_bridge", {}) or {})
+        bridge["status"] = "telemetry_received"
+        bridge["client"] = str(payload.get("client", bridge.get("client", ""))).strip()[:80]
+        bridge["map"] = str(payload.get("map", bridge.get("map", ""))).strip()[:120]
+        bridge["quality"] = str(payload.get("quality", bridge.get("quality", ""))).strip()[:60]
+        try:
+            bridge["fps"] = max(0.0, min(1000.0, float(payload.get("fps", bridge.get("fps", 0.0) or 0.0))))
+        except Exception:
+            bridge["fps"] = float(bridge.get("fps", 0.0) or 0.0)
+        bridge["last_telemetry_at"] = datetime.utcnow().isoformat()
+        app_state["unreal_bridge"] = bridge
+        return jsonify({"success": True, "bridge": bridge})
+    except Exception as e:
+        print(f"[Unreal Bridge Telemetry Error] {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route('/api/profile', methods=['GET'])
 def get_user_profile():
     """Get persistent user profile memory across sessions."""
@@ -35773,6 +37181,106 @@ def code_edit():
         print(f"[Code Edit Error] {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+def _trim_scene_snapshot_value(value, depth=0):
+    if depth > 6:
+        return None
+    if isinstance(value, dict):
+        trimmed = {}
+        for idx, (key, val) in enumerate(value.items()):
+            if idx >= 120:
+                break
+            trimmed[str(key)[:80]] = _trim_scene_snapshot_value(val, depth + 1)
+        return trimmed
+    if isinstance(value, list):
+        return [_trim_scene_snapshot_value(v, depth + 1) for v in value[:80]]
+    if isinstance(value, str):
+        return value[:600]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return str(value)[:240]
+
+def _sanitize_client_scene_snapshot(snapshot_raw):
+    if not isinstance(snapshot_raw, dict):
+        return {}
+    return _trim_scene_snapshot_value(snapshot_raw, depth=0) or {}
+
+def _serialize_scene_snapshot_text(snapshot, max_chars=5200):
+    if not snapshot or not isinstance(snapshot, dict):
+        return ""
+    try:
+        text = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        text = str(snapshot)
+    return text[:max_chars]
+
+def _scene_snapshot_brief(snapshot):
+    if not isinstance(snapshot, dict):
+        return ""
+    try:
+        narrative = dict(snapshot.get("narrative") or {})
+        home_env = dict(snapshot.get("home_environment") or {})
+        autonomy = dict(snapshot.get("autonomy") or {})
+        kitchen = dict(snapshot.get("kitchen") or {})
+        wardrobe = dict(snapshot.get("wardrobe") or {})
+        life = dict(snapshot.get("life_registry") or {})
+        world_engine = dict(snapshot.get("world_engine") or {})
+        active_scene = str(narrative.get("active_scene") or "").strip() or "unset"
+        active_arc = str(narrative.get("active_arc") or "").strip() or "unset"
+        coherence = float(narrative.get("coherence_pct", 0) or 0)
+        city = str((dict(home_env.get("location") or {})).get("city") or "").strip() or "unknown"
+        room = str(home_env.get("current_room") or "").strip() or "unknown"
+        taste = str(kitchen.get("taste_profile") or "").strip() or "comfort"
+        outfit = str(wardrobe.get("current_outfit") or "").strip() or "casual"
+        beings = int(life.get("active_count", 0) or 0)
+        autonomy_on = autonomy.get("aurion_control", True) is not False
+        model_pipe = str((dict(world_engine.get("asset_pipelines") or {})).get("model_pipeline") or "ready")
+        return (
+            f"Scene={active_scene}; Arc={active_arc}; Coherence={coherence:.0f}%; "
+            f"Home={city}/{room}; Taste={taste}; Outfit={outfit}; "
+            f"LifeActive={beings}; Autonomy={'on' if autonomy_on else 'off'}; "
+            f"ModelPipeline={model_pipe}"
+        )
+    except Exception:
+        return ""
+
+def _persist_client_scene_snapshot(snapshot, client_context_text=""):
+    if not isinstance(snapshot, dict) or not snapshot:
+        return
+    try:
+        snapshot_text = _serialize_scene_snapshot_text(snapshot, max_chars=14000)
+        digest_source = snapshot_text + "\n" + str(client_context_text or "")
+        digest = hashlib.sha256(digest_source.encode("utf-8", errors="ignore")).hexdigest()
+        if digest == str(app_state.get("_last_client_scene_snapshot_digest") or ""):
+            app_state["latest_client_scene_snapshot"] = snapshot
+            app_state["latest_client_world_context"] = str(client_context_text or "")[:6000]
+            return
+        app_state["_last_client_scene_snapshot_digest"] = digest
+        app_state["latest_client_scene_snapshot"] = snapshot
+        app_state["latest_client_world_context"] = str(client_context_text or "")[:6000]
+        app_state["latest_client_scene_snapshot_at"] = datetime.utcnow().isoformat()
+        memory.add_knowledge_batch(
+            f"Client scene builder cognition snapshot ({app_state['latest_client_scene_snapshot_at']} UTC):\n"
+            f"{snapshot_text}\n\nClient world continuity context:\n{str(client_context_text or '')[:2600]}",
+            source="client_scene_builder_snapshot",
+            metadata={"captured_at": app_state["latest_client_scene_snapshot_at"], "digest": digest[:24]}
+        )
+        try:
+            narrative = dict(snapshot.get("narrative") or {})
+            autonomy = dict(snapshot.get("autonomy") or {})
+            home_env = dict(snapshot.get("home_environment") or {})
+            kitchen = dict(snapshot.get("kitchen") or {})
+            life = dict(snapshot.get("life_registry") or {})
+            memory.add_profile_item("life_context", str(narrative.get("active_scene") or ""), key="scene_builder_active_scene")
+            memory.add_profile_item("life_context", str(narrative.get("active_arc") or ""), key="scene_builder_active_arc")
+            memory.add_profile_item("life_context", str((dict(home_env.get("location") or {})).get("city") or ""), key="scene_builder_home_city")
+            memory.add_profile_item("life_context", str(kitchen.get("taste_profile") or ""), key="scene_builder_taste_profile")
+            memory.add_profile_item("life_context", str(int(life.get("active_count", 0) or 0)), key="scene_builder_active_life_count")
+            memory.add_profile_item("life_context", "enabled" if autonomy.get("aurion_control", True) is not False else "disabled", key="scene_builder_aurion_control")
+        except Exception as _prof_err:
+            print(f"[Scene Snapshot Profile Persist Error] {_prof_err}")
+    except Exception as e:
+        print(f"[Scene Snapshot Persist Error] {e}")
+
 @app.route('/api/message', methods=['POST'])
 def handle_message():
     try:
@@ -35782,7 +37290,16 @@ def handle_message():
         data = request.get_json(force=True, silent=True) or {}
         
         raw_user_text = str(data.get('text') or data.get('message', '')).strip()
-        client_context = str(data.get('client_context', '')).strip()[:2800]
+        client_context_raw = data.get('client_context', '')
+        if isinstance(client_context_raw, (dict, list)):
+            try:
+                client_context = json.dumps(client_context_raw, ensure_ascii=False)
+            except Exception:
+                client_context = str(client_context_raw)
+        else:
+            client_context = str(client_context_raw or '')
+        client_context = client_context.strip()[:4200]
+        client_scene_snapshot = _sanitize_client_scene_snapshot(data.get('client_scene_snapshot'))
         max_inline_chars = max(2000, int(os.getenv("AURION_MAX_INLINE_MESSAGE_CHARS", "12000")))
         model_excerpt_chars = max(800, int(os.getenv("AURION_MODEL_EXCERPT_CHARS", "6000")))
         user_text = raw_user_text[:max_inline_chars]
@@ -35834,6 +37351,7 @@ def handle_message():
                 "media_action": None
             })
         _auto_sync_if_due(reason="message")
+        _apply_cloud_compute_boost(force=False)
         _index_v41_document_if_needed(force=False)
         if len(raw_user_text) > max_inline_chars:
             # Keep full long-form payload in RAG memory while using a bounded excerpt for realtime response generation.
@@ -35946,6 +37464,13 @@ def handle_message():
                         rag_context = f"{rag_context}\n\n{unified_presence_context}" if rag_context else unified_presence_context
                     if client_context:
                         rag_context = f"{rag_context}\n\nClient world continuity context:\n{client_context}" if rag_context else f"Client world continuity context:\n{client_context}"
+                    snapshot_text = _serialize_scene_snapshot_text(client_scene_snapshot, max_chars=5200)
+                    if snapshot_text:
+                        rag_context = (
+                            f"{rag_context}\n\nClient scene-builder state snapshot (JSON):\n{snapshot_text}"
+                            if rag_context else
+                            f"Client scene-builder state snapshot (JSON):\n{snapshot_text}"
+                        )
                     # Inject discovery ledger and autonomy tag documentation
                     try:
                         disc_ctx = _build_aurion_discovery_context()
@@ -36006,6 +37531,10 @@ def handle_message():
             _persist_personality_continuity_snapshot(reason="chat-turn", query=user_text)
         except Exception as _snap_e:
             print(f"[Continuity Snapshot Error] {_snap_e}")
+        try:
+            _persist_client_scene_snapshot(client_scene_snapshot, client_context_text=client_context)
+        except Exception as _scene_err:
+            print(f"[Scene Snapshot Ingest Error] {_scene_err}")
 
         # Persist Aurion's latest thought chain to long-term memory immediately after each chat turn
         try:
@@ -36181,6 +37710,7 @@ def handle_message():
 @app.route('/api/llm/settings', methods=['GET'])
 def get_llm_settings():
     orchestration = dict(app_state.get("llm_orchestration", {}) or {})
+    compute_boost = _sanitize_compute_boost_settings(app_state.get("compute_boost", {}))
     return jsonify({
         "success": True,
         "provider": getattr(personality_engine, "llm_provider", "none"),
@@ -36190,8 +37720,38 @@ def get_llm_settings():
         "combo_mode": str(orchestration.get("combo_mode", "dual_synthesize") or "dual_synthesize"),
         "enabled_providers": list(orchestration.get("enabled_providers", []) or []),
         "available_providers": ["ollama", "sillytavern", "oobabooga", "openrouter", "cohere", "openai", "anthropic", "gemini", "m365copilot"],
-        "connected_providers": sorted(list(getattr(personality_engine, "llm_clients", {}).keys()))
+        "connected_providers": sorted(list(getattr(personality_engine, "llm_clients", {}).keys())),
+        "compute_boost": compute_boost
     })
+
+@app.route('/api/compute/boost', methods=['GET'])
+def get_compute_boost():
+    payload = _sanitize_compute_boost_settings(app_state.get("compute_boost", {}))
+    return jsonify({
+        "success": True,
+        "compute_boost": payload,
+        "connected_providers": sorted(list(getattr(personality_engine, "llm_clients", {}).keys())),
+        "active_provider": str(getattr(personality_engine, "llm_provider", "none") or "none"),
+        "active_model": str(getattr(personality_engine, "llm_model", "") or "")
+    })
+
+@app.route('/api/compute/boost', methods=['POST'])
+def update_compute_boost():
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        current = _sanitize_compute_boost_settings(app_state.get("compute_boost", {}))
+        merged = _sanitize_compute_boost_settings({**current, **(data if isinstance(data, dict) else {})})
+        app_state["compute_boost"] = merged
+        result = _apply_cloud_compute_boost(force=bool(data.get("apply_now", True)))
+        return jsonify({
+            "success": True,
+            "compute_boost": app_state.get("compute_boost", {}),
+            "result": result,
+            "active_provider": str(getattr(personality_engine, "llm_provider", "none") or "none"),
+            "active_model": str(getattr(personality_engine, "llm_model", "") or "")
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/llm/settings', methods=['POST'])
 def update_llm_settings():
@@ -36267,6 +37827,8 @@ def update_llm_settings():
         }
         personality_engine.llm_orchestration = dict(app_state["llm_orchestration"])
         _persist_llm_orchestration_to_profile()
+        if _sanitize_compute_boost_settings(app_state.get("compute_boost", {})).get("enabled", True):
+            _apply_cloud_compute_boost(force=True)
 
         return jsonify({
             "success": True,

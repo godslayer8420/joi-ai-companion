@@ -1559,6 +1559,10 @@ class PersonalityEngine:
         if self._is_single_identity_prompt(user_text):
             return "I'm Aurion. One identity only, never split."
         cleaned = self._collapse_repeated_sentences(response_text)
+        if cleaned:
+            cleaned = re.sub(r"^\s*yes\s+%s[\s,.:;-]*" % re.escape(str(user_name or "Billy")), "", cleaned, flags=re.I)
+            if not cleaned.strip():
+                cleaned = "I hear you."
         if cleaned and not self._looks_non_human_or_drifting(cleaned):
             return cleaned
         rewritten = self._rewrite_clean_human(cleaned or response_text, user_text)
@@ -2666,6 +2670,7 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
 
     def generate_response(self, user_emotion, user_text=None, memory_system=None, user_name=None, speech_style="casual", rag_context=None, behavior_settings=None):
         user_name = self.sanitize_user_name(user_name)
+        recent_responses = memory_system.get_recent_aurion_responses(count=8) if memory_system else []
         response_mode, mode_override = self._resolve_response_mode(user_text, memory_system=memory_system) if user_text else ("conversation", None)
         if user_text:
             if mode_override:
@@ -2697,12 +2702,15 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
             if multi_sentence_llm and is_multi and not self._response_covers_all_parts(multi_sentence_llm, user_text, max_parts=4):
                 multi_sentence_llm = None
             if multi_sentence_llm:
+                multi_sentence_llm = self._collapse_repeated_sentences(multi_sentence_llm)
+                if self._is_unoriginal_response(multi_sentence_llm, recent_responses):
+                    multi_sentence_llm = None
+            if multi_sentence_llm:
                 return self._ensure_clean_human_response(multi_sentence_llm, user_text, user_name=user_name)
             if is_multi:
                 multi_sentence_fallback = self._generate_multi_sentence_fallback(user_text, user_name=user_name)
                 if multi_sentence_fallback:
                     return self._ensure_clean_human_response(multi_sentence_fallback, user_text, user_name=user_name)
-        recent_responses = memory_system.get_recent_aurion_responses(count=8) if memory_system else []
         # Secondary LLM path: single plain call without re-running CoT (CoT already ran above).
         # Only reached when _generate_multi_sentence_llm_response returned None.
         if self.use_llm and user_text:
@@ -2785,6 +2793,18 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
             "I want to understand what you're carrying and be genuinely helpful in this moment. "
             "Share as much as you want, and I'll stay with you through it."
         )
+
+    def chat(self, prompt: str, system_override: str = None) -> str:
+        """Lightweight programmatic chat — used by autonomy/agent loops.
+        Calls the LLM directly with the given prompt and optional system override.
+        Falls back to generate_response if LLM is unavailable."""
+        if self.use_llm and prompt:
+            messages = [{"role": "user", "content": str(prompt)[:4000]}]
+            result = self._call_llm(messages, max_tokens=400, temperature=0.72,
+                                    system=system_override, purpose="agent")
+            if result:
+                return str(result).strip()
+        return self.generate_response("neutral", user_text=prompt)
 
     def _generate_context_aware_response(self, user_text, user_emotion, user_name=None):
         text_lower = user_text.lower()
