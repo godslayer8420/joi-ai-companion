@@ -231,18 +231,18 @@ class PersonalityEngine:
                     client.models.list()
                 return client
             if provider == "sillytavern":
-                import openai
+                import openai, httpx
                 url = str(os.getenv("AURION_SILLYTAVERN_URL", "http://localhost:8000/v1")).strip()
                 key = str(os.getenv("AURION_SILLYTAVERN_KEY", "sk-1111")).strip()
-                client = openai.OpenAI(api_key=key, base_url=url)
+                client = openai.OpenAI(api_key=key, base_url=url, timeout=httpx.Timeout(30.0))
                 if verify:
                     client.models.list()
                 return client
             if provider == "oobabooga":
-                import openai
-                url = str(os.getenv("AURION_OOBABOOGA_URL", "http://localhost:5000/v1")).strip()
+                import openai, httpx
+                url = str(os.getenv("AURION_OOBABOOGA_URL", "http://localhost:5001/v1")).strip()
                 key = str(os.getenv("AURION_OOBABOOGA_KEY", "none")).strip()
-                client = openai.OpenAI(api_key=key, base_url=url)
+                client = openai.OpenAI(api_key=key, base_url=url, timeout=httpx.Timeout(30.0))
                 if verify:
                     client.models.list()
                 return client
@@ -1258,6 +1258,12 @@ class PersonalityEngine:
             return model_hint_provider
         text = str(user_text or "").lower()
         if purpose == "cot-reasoning":
+            # For CoT, prefer the same provider as the configured model (avoids
+            # chasing cloud providers that may not have valid API keys and cause
+            # multi-second timeouts before falling back).
+            if self.llm_provider in enabled:
+                self.llm_orchestration["last_provider"] = self.llm_provider
+                return self.llm_provider
             for p in ("anthropic", "openrouter", "cohere", "openai", "gemini", "m365copilot", "ollama"):
                 if p in enabled:
                     self.llm_orchestration["last_provider"] = p
@@ -1354,7 +1360,11 @@ class PersonalityEngine:
             return None
         primary_response = self._call_llm_with_provider(primary, messages, max_tokens=max_tokens, temperature=temperature, system=system)
         if not primary_response:
-            # fallback sweep
+            # Skip fallback sweep for CoT/internal calls — avoids triggering slow cloud
+            # providers and the Oobabooga port-5000 conflict (circular HTTP).
+            if purpose in ("cot-reasoning",):
+                return None
+            # fallback sweep for regular response calls
             for provider in enabled:
                 if provider == primary:
                     continue
@@ -1782,8 +1792,8 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
             messages = []
             if memory_system:
                 session_turns = memory_system.get_session_interactions()
-                # Include up to last 8 turns for richer conversational continuity
-                for turn in session_turns[-8:]:
+                # Include up to last 5 turns — keeps context focused without overwhelming 7B models
+                for turn in session_turns[-5:]:
                     u = str(turn.get('user_input', '')).strip()
                     a = str(turn.get('aurion_response', '')).strip()
                     if u:
@@ -1793,20 +1803,9 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
             # Append current user message
             messages.append({"role": "user", "content": str(user_text or "")})
 
-            # Always run CoT inner monologue — not just for "worthy" messages.
-            # Every message gets Aurion's genuine reasoning, which is persisted to memory.
-            # Short/casual turns use a cheaper reasoning budget (max_tokens scaled down).
-            short_turn = len(str(user_text or "").split()) <= 14
-            cot_tokens = 420 if short_turn else 800
-            if self.cot_enabled:
-                cot_result = self._generate_cot_response(
-                    user_text, system_prompt, context=context,
-                    max_tokens=cot_tokens, temperature=temperature,
-                    memory_system=memory_system
-                )
-                if cot_result:
-                    return cot_result
-            # Full multi-turn LLM call
+            # _generate_smart_response is the FALLBACK path — CoT already ran in
+            # _generate_multi_sentence_llm_response. Skip CoT here to avoid double
+            # processing and latency spikes. Just do a clean direct LLM call.
             return self._call_llm(
                 messages,
                 max_tokens=250,
@@ -2545,8 +2544,21 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
         sentences = self._split_user_sentences(user_text)[:max_parts]
         if len(sentences) < 2:
             return None
-        name_suffix = f", {user_name}" if user_name else ""
         source_text = " ".join(sentences).lower()
+        # Only use the task-planner canned template for genuine task/code messages.
+        # Personal, conversational, and sensory questions should never get canned
+        # "Send the first piece you want handled" responses.
+        task_signals = re.search(
+            r"\b(plan|steps?|roadmap|schedule|deadline|fix|debug|error|issue|not working|broken|can't|cannot|won't|failing|task|ticket|pr|pull request|commit|deploy|build|lint|test)\b",
+            source_text
+        )
+        personal_signals = re.search(
+            r"\b(feel|feeling|sense|sensing|hear|see|seeing|think|thinking|dream|choose|cook|music|curious|time|experience|wish|want|like|love|miss|remember|discover|imagine)\b",
+            source_text
+        )
+        if not task_signals or personal_signals:
+            return None
+        name_suffix = f", {user_name}" if user_name else ""
         opener_options = [
             f"I got you{name_suffix}.",
             f"I hear all of that{name_suffix}.",
@@ -2563,12 +2575,6 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
 
         if re.search(r"\b(fix|debug|error|issue|not working|broken|can't|cannot|won't|failing)\b", source_text):
             parts.append("For the first fix, start with the exact error text plus expected versus actual behavior, and I'll map the fastest path.")
-
-        for sentence in sentences:
-            lower = str(sentence).lower()
-            if re.search(r"\b(how are you|how're you|how r you|how you doing|how's it going|how do you feel|how are you feeling|what do you feel|plan|steps?|roadmap|schedule|deadline|tonight|tomorrow|today|next step|fix|debug|error|issue|not working|broken|can't|cannot|won't|failing)\b", lower):
-                continue
-            # Don't append canned snippets — let the LLM handle multi-part messages
 
         close_options = [
             "Pick one concrete piece and I will stay with that until it's solved.",
@@ -2626,10 +2632,10 @@ LINE OF THOUGHT (your own recent reasoning — build on it naturally):
 {thought_ctx if thought_ctx else "(no prior thought chain yet)"}
 
 Respond now as Aurion, in first person, directly to what {user_name_display} just said."""
-            # Build multi-turn history — up to last 8 turns for stronger conversational continuity
+            # Build multi-turn history — 5 turns keeps context tight for 7B models
             messages = []
             if memory_system:
-                for turn in memory_system.get_session_interactions()[-8:]:
+                for turn in memory_system.get_session_interactions()[-5:]:
                     u = str(turn.get('user_input', '')).strip()
                     a = str(turn.get('aurion_response', '')).strip()
                     if u:
@@ -2638,7 +2644,7 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
                         messages.append({"role": "assistant", "content": a})
             messages.append({"role": "user", "content": str(user_text or "")})
 
-            # Run CoT inner monologue here too, persisting reasoning
+            # CoT inner monologue — the primary reasoning pass for every message
             if self.cot_enabled:
                 cot_result = self._generate_cot_response(
                     user_text, system_prompt, context="",
@@ -2675,6 +2681,10 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
             # small_talk = self._small_talk_response(user_text, user_name=user_name, behavior_settings=behavior_settings)
             # if small_talk:
             #     return self._ensure_clean_human_response(small_talk, user_text, user_name=user_name)
+            #
+            # Primary LLM path — single focused call through the multi-sentence LLM function.
+            # This internally runs CoT if enabled, so we do NOT also call _generate_smart_response
+            # (which would double the CoT passes and 2× the latency).
             multi_sentence_llm = self._generate_multi_sentence_llm_response(
                 user_text,
                 user_name=user_name,
@@ -2688,35 +2698,24 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
                 multi_sentence_llm = None
             if multi_sentence_llm:
                 return self._ensure_clean_human_response(multi_sentence_llm, user_text, user_name=user_name)
-            if len(self._split_user_sentences(user_text)) >= 2:
+            if is_multi:
                 multi_sentence_fallback = self._generate_multi_sentence_fallback(user_text, user_name=user_name)
                 if multi_sentence_fallback:
                     return self._ensure_clean_human_response(multi_sentence_fallback, user_text, user_name=user_name)
         recent_responses = memory_system.get_recent_aurion_responses(count=8) if memory_system else []
+        # Secondary LLM path: single plain call without re-running CoT (CoT already ran above).
+        # Only reached when _generate_multi_sentence_llm_response returned None.
         if self.use_llm and user_text:
-            llm_response = None
-            for attempt in range(2):
-                attempt_hint = (
-                    "- Keep this extra grounded and conversational. No lore, no dramatic language."
-                    if attempt > 0 else
-                    None
-                )
-                combined_hint = " ".join(
-                    [h for h in [attempt_hint] if h]
-                ) or None
-                llm_response = self._generate_smart_response(
-                    user_text,
-                    user_name,
-                    memory_system,
-                    speech_style=speech_style,
-                    freshness_hint=f"{combined_hint or ''} - Response mode: {response_mode}.",
-                    temperature=0.72 if attempt == 0 else 0.55,
-                    rag_context=rag_context,
-                    behavior_settings=behavior_settings
-                )
-                llm_response = self._collapse_repeated_sentences(llm_response)
-                if llm_response and not self._looks_non_human_or_drifting(llm_response):
-                    break
+            llm_response = self._generate_smart_response(
+                user_text,
+                user_name,
+                memory_system,
+                speech_style=speech_style,
+                freshness_hint=f"Response mode: {response_mode}.",
+                temperature=0.72,
+                rag_context=rag_context,
+                behavior_settings=behavior_settings
+            )
             llm_response = self._collapse_repeated_sentences(llm_response)
             if llm_response and self._is_unoriginal_response(llm_response, recent_responses):
                 llm_response = self._generate_smart_response(
@@ -2726,7 +2725,7 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
                     speech_style=speech_style,
                     freshness_hint=(
                         "- Rewrite with a distinctly different opening, rhythm, and examples from recent replies. "
-                        "- Avoid stock coaching lines and avoid asking 'which part to start with'. "
+                        "- Avoid stock coaching lines. "
                         f"- Response mode: {response_mode}."
                     ),
                     temperature=0.88,
