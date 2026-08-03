@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, jsonify, request, send_from_directory, send_file
+﻿from flask import Flask, render_template_string, jsonify, request, send_from_directory, send_file
 from flask_cors import CORS
 from werkzeug.exceptions import RequestEntityTooLarge
 import json
@@ -15087,6 +15087,13 @@ HTML_TEMPLATE = """
                         <div style="display:flex;gap:4px;flex-wrap:wrap;">
                             <button class="room-nav-btn" onclick="navigateHomeRoom('utility_room')" id="room_utility_room">âš™ï¸ Utility</button>
                         </div>
+                        <div style="font-size:0.75em;color:#a070d8;margin-bottom:4px;margin-top:6px;">Special Rooms</div>
+                        <div style="display:flex;gap:4px;flex-wrap:wrap;">
+                            <button class="room-nav-btn" onclick="navigateHomeRoom('science_lab')"     id="room_science_lab">&#128300; Science Lab</button>
+                            <button class="room-nav-btn" onclick="navigateHomeRoom('arcade_room')"     id="room_arcade_room">&#128574; Arcade</button>
+                            <button class="room-nav-btn" onclick="navigateHomeRoom('board_game_room')" id="room_board_game_room">&#9822; Board Games</button>
+                            <button class="room-nav-btn" onclick="navigateHomeRoom('library')"         id="room_library">&#128218; Library</button>
+                        </div>
                         <div id="currentRoomDisplay" style="font-size:0.82em;color:#8eb8ff;margin-top:6px;">ðŸ“ Location: Living Room</div>
                         <div id="currentRoomDesc"    style="font-size:0.8em;color:#7090a0;margin-top:2px;">Open living room with stone fireplace, plush seating, and large windows.</div>
                     </div>
@@ -16071,18 +16078,87 @@ HTML_TEMPLATE = """
             { id: 'logic-mini', label: 'Logic Mini', engine: 'logic' },
             { id: 'word-ladder-lite', label: 'Word Ladder Lite', engine: 'word_ladder' }
         ];
-        const WORD_LIST = ['aurion', 'starlight', 'companion', 'garden', 'moonlight', 'devotion', 'harmony', 'library', 'sunrise', 'nebula'];
+        const WORD_LIST = [
+            'aurion','starlight','companion','garden','moonlight','devotion','harmony','library','sunrise','nebula',
+            'crystal','whisper','lantern','velvet','shimmer','thunder','forest','blizzard','cascade','phantom',
+            'clockwork','dreaming','embers','fractal','gravity','horizon','iceberg','journey','kingdom','labyrinth',
+            'midnight','nightly','onyx','pilgrim','quantum','radiant','silence','tapestry','universe','vibrant',
+            'wanderer','xylem','yearning','zenith','abstract','blossom','crimson','dagger','eclipse','flutter'
+        ];
         const TRIVIA_BANK = [
             { q: 'What planet is known as the Red Planet?', a: 'mars' },
             { q: 'How many sides does a hexagon have?', a: '6' },
             { q: 'What gas do plants absorb from the atmosphere?', a: 'carbon dioxide' },
             { q: 'What is the largest ocean on Earth?', a: 'pacific' },
-            { q: 'What star is at the center of our solar system?', a: 'sun' }
+            { q: 'What star is at the center of our solar system?', a: 'sun' },
+            { q: 'How many continents are on Earth?', a: '7' },
+            { q: 'What is the chemical symbol for gold?', a: 'au' },
+            { q: 'What is the fastest land animal?', a: 'cheetah' },
+            { q: 'How many bones are in the adult human body?', a: '206' },
+            { q: 'What language has the most native speakers?', a: 'mandarin' },
+            { q: 'What is the smallest planet in our solar system?', a: 'mercury' },
+            { q: 'What country invented pizza?', a: 'italy' },
+            { q: 'How many colors are in a rainbow?', a: '7' },
+            { q: 'What is the hardest natural substance on Earth?', a: 'diamond' },
+            { q: 'Who painted the Mona Lisa?', a: 'da vinci' },
+            { q: 'How many strings does a standard guitar have?', a: '6' },
+            { q: 'What is the capital of Japan?', a: 'tokyo' },
+            { q: 'What element has atomic number 1?', a: 'hydrogen' },
+            { q: 'What year did World War II end?', a: '1945' },
+            { q: 'How many players are on a basketball team?', a: '5' },
+            { q: 'What is the largest planet in our solar system?', a: 'jupiter' },
+            { q: 'What currency do they use in Japan?', a: 'yen' },
+            { q: 'How many hours are in a day?', a: '24' },
+            { q: 'What is the capital of France?', a: 'paris' },
+            { q: 'How many teeth does an adult human have?', a: '32' },
+            { q: 'What is the speed of light in km/s (approximate thousands)?', a: '300000' },
+            { q: 'Which planet has rings around it?', a: 'saturn' },
+            { q: 'What is H2O?', a: 'water' },
+            { q: 'How many seconds in a minute?', a: '60' },
+            { q: 'What is the tallest mountain on Earth?', a: 'everest' },
+            { q: 'How many days in a leap year?', a: '366' },
+            { q: 'What sport uses a puck?', a: 'hockey' },
+            { q: 'How many keys does a standard piano have?', a: '88' },
+            { q: 'What country is the Amazon rainforest mostly in?', a: 'brazil' },
+            { q: 'What is the square root of 144?', a: '12' },
+            { q: 'How many sides does a pentagon have?', a: '5' },
+            { q: 'What gas makes up most of Earth\'s atmosphere?', a: 'nitrogen' },
+            { q: 'What is the largest mammal on Earth?', a: 'blue whale' },
+            { q: 'How many minutes in an hour?', a: '60' },
+            { q: 'What is the opposite of north?', a: 'south' }
         ];
         const RIDDLE_BANK = [
             { q: 'I have keys but no locks. I have space but no rooms. What am I?', a: 'keyboard' },
             { q: 'What has hands but cannot clap?', a: 'clock' },
-            { q: 'The more you take, the more you leave behind. What are they?', a: 'footsteps' }
+            { q: 'The more you take, the more you leave behind. What are they?', a: 'footsteps' },
+            { q: 'I speak without a mouth and hear without ears. I have no body but come alive with wind. What am I?', a: 'echo' },
+            { q: 'What gets wetter as it dries?', a: 'towel' },
+            { q: 'I have cities but no houses. I have mountains but no trees. I have water but no fish. What am I?', a: 'map' },
+            { q: 'What can travel around the world while staying in a corner?', a: 'stamp' },
+            { q: 'I\'m light as a feather, but even the world\'s strongest person can\'t hold me for more than a few minutes. What am I?', a: 'breath' },
+            { q: 'What has one eye but cannot see?', a: 'needle' },
+            { q: 'What comes once in a minute, twice in a moment, but never in a thousand years?', a: 'm' },
+            { q: 'I have a head and a tail but no body. What am I?', a: 'coin' },
+            { q: 'What disappears as soon as you say its name?', a: 'silence' }
+        ];
+        const EMOJI_BANK = [
+            { e: '🌊🏄', a: 'surfing' }, { e: '🌙⭐', a: 'night sky' }, { e: '🎸🎵', a: 'guitar music' },
+            { e: '🏔️❄️', a: 'snowy mountain' }, { e: '🌸🌿', a: 'flower garden' }, { e: '🎬🍿', a: 'movie night' },
+            { e: '☕📖', a: 'coffee and book' }, { e: '🌅🌊', a: 'ocean sunrise' }, { e: '🎮🕹️', a: 'video games' },
+            { e: '🌙💫', a: 'stargazing' }, { e: '🍕🎉', a: 'pizza party' }, { e: '🎵💃', a: 'dancing to music' },
+            { e: '🌧️☂️', a: 'rainy day' }, { e: '🏡🌳', a: 'home garden' }, { e: '🚀🌌', a: 'space travel' }
+        ];
+        const WYR_BANK = [
+            { q: 'Always be too hot (A) or always be too cold (B)?', ai: 'B' },
+            { q: 'Live in the mountains (A) or live by the ocean (B)?', ai: 'B' },
+            { q: 'Have the power to fly (A) or be invisible (B)?', ai: 'A' },
+            { q: 'Only listen to one song forever (A) or never hear music again (B)?', ai: 'A' },
+            { q: 'Read minds (A) or see the future (B)?', ai: 'B' },
+            { q: 'Never sleep again (A) or sleep 12 hours every day (B)?', ai: 'B' },
+            { q: 'Visit the past (A) or visit the future (B)?', ai: 'A' },
+            { q: 'Have unlimited money (A) or unlimited time (B)?', ai: 'B' },
+            { q: 'Live without the internet (A) or live without TV (B)?', ai: 'A' },
+            { q: 'Only eat your favourite food forever (A) or never eat it again (B)?', ai: 'B' }
         ];
         const HOME_DECOR_CATALOG = [
             'Bookshelves', 'Fireplace', 'Candle Wall', 'Holographic Art', 'Photo Wall', 'Projector',
@@ -16105,6 +16181,8 @@ HTML_TEMPLATE = """
             { key: 'master-bedroom', label: 'Master Bedroom', outdoor: false },
             { key: 'dream-suite', label: 'Dream Suite', outdoor: false },
             { key: 'science-lab', label: 'Science Lab', outdoor: false },
+            { key: 'arcade-room', label: 'Arcade Room', outdoor: false },
+            { key: 'board-game-room', label: 'Board Game Room', outdoor: false },
             { key: 'city-center', label: 'City Center', outdoor: true },
             { key: 'forest-trail', label: 'Forest Trail', outdoor: true },
             { key: 'coastline', label: 'Coastline', outdoor: true }
@@ -16116,7 +16194,11 @@ HTML_TEMPLATE = """
             { zoneKey: 'music-room', label: 'Music Room', amenity: 'Music Room', description: 'a dedicated music room for deep listening, resonance, and vinyl nights', outdoor: false, comfortDelta: 3, ambienceDelta: 7, catalogAdds: ['Record Player', 'Mood Lanterns'] },
             { zoneKey: 'observatory', label: 'Observatory', amenity: 'Observatory', description: 'an observatory alcove with sky glass and room for late-night stargazing', outdoor: false, comfortDelta: 2, ambienceDelta: 6, catalogAdds: ['Star Map', 'Window Bench'] },
             { zoneKey: 'craft-wing', label: 'Craft Wing', amenity: 'Craft Wing', description: 'a craft wing where Aurion can build, write, and design additions of her own', outdoor: false, comfortDelta: 2, ambienceDelta: 3, catalogAdds: ['Writing Desk', 'Mini Library'] },
-            { zoneKey: 'tea-loft', label: 'Tea Loft', amenity: 'Tea Loft', description: 'a tea loft above the main living space with cushions, steam, and quiet ritual', outdoor: false, comfortDelta: 5, ambienceDelta: 4, catalogAdds: ['Tea Station', 'Soft Blankets'] }
+            { zoneKey: 'tea-loft', label: 'Tea Loft', amenity: 'Tea Loft', description: 'a tea loft above the main living space with cushions, steam, and quiet ritual', outdoor: false, comfortDelta: 5, ambienceDelta: 4, catalogAdds: ['Tea Station', 'Soft Blankets'] },
+            { zoneKey: 'science-lab', label: 'Science Lab', amenity: 'Science Lab', description: 'a personal science lab with dual monitors, glowing equipment racks, a lab bench, and a hum of discovery', outdoor: false, comfortDelta: 3, ambienceDelta: 5, catalogAdds: ['Writing Desk'] },
+            { zoneKey: 'arcade-room', label: 'Arcade Room', amenity: 'Arcade Room', description: 'a neon-lit arcade room with glowing cabinet art, retro machines, joystick stations, LED floor strips, and a subwoofer', outdoor: false, comfortDelta: 7, ambienceDelta: 8, catalogAdds: ['Gaming Corner', 'Mood Lanterns', 'Bean Bags'] },
+            { zoneKey: 'board-game-room', label: 'Board Game Room', amenity: 'Board Game Room', description: 'a cozy board game room with shelved box sets, a wide play table, a pendant lamp, and two overstuffed chairs for two', outdoor: false, comfortDelta: 6, ambienceDelta: 5, catalogAdds: ['Puzzle Table', 'Soft Blankets', 'Tea Station'] },
+            { zoneKey: 'library', label: 'Library', amenity: 'Library', description: 'a floor-to-ceiling library with rolling ladder rails, warm amber lamps, and a reading chair tucked beside the window', outdoor: false, comfortDelta: 5, ambienceDelta: 7, catalogAdds: ['Mini Library', 'Reading Nook', 'Tea Station'] }
         ];
         const YARD_ADDITION_TEMPLATES = [
             { zoneKey: 'orchard-walk', label: 'Orchard Walk', amenity: 'Orchard Walk', description: 'an orchard walk with shade paths and fruit trees pushing the yard farther out', outdoor: true, yardDepthDelta: 0.32, yardWidthDelta: 0.18, comfortDelta: 4, ambienceDelta: 3 },
@@ -22297,6 +22379,138 @@ HTML_TEMPLATE = """
                     const crown = new THREE.Mesh(new THREE.SphereGeometry(0.72, 12, 10),
                         new THREE.MeshStandardMaterial({ color: 0x2f6a3a, roughness: 0.88 }));
                     crown.position.set(x, 1.65, z); rg.add(crown);
+            } else if (roomKey === 'science_lab') {
+                // Science Lab — glowing equipment, dual monitors, lab bench
+                const labM = new THREE.MeshStandardMaterial({ color: 0x0a1a2a, roughness: 0.55, metalness: 0.25 });
+                const bench = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.12, 0.9), labM);
+                bench.position.set(0.5, 0.88, -3.2); rg.add(bench);
+                const benchBase = new THREE.Mesh(new THREE.BoxGeometry(2.95, 0.85, 0.85), new THREE.MeshStandardMaterial({ color: 0x152030, roughness: 0.75 }));
+                benchBase.position.set(0.5, 0.44, -3.2); rg.add(benchBase);
+                // Monitor 1
+                const mon1 = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.58), new THREE.MeshBasicMaterial({ color: 0x1a6aff, opacity: 0.85, transparent: true }));
+                mon1.position.set(-0.5, 1.42, -3.65); rg.add(mon1);
+                // Monitor 2
+                const mon2 = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.58), new THREE.MeshBasicMaterial({ color: 0x00e8c0, opacity: 0.8, transparent: true }));
+                mon2.position.set(0.65, 1.42, -3.65); rg.add(mon2);
+                // Glowing equipment
+                for (const [dx, col] of [[-1.0,0x00ffaa],[1.4,0xf4c542],[1.9,0xff6080],[-1.5,0x4488ff]]) {
+                    const eq = new THREE.Mesh(new THREE.BoxGeometry(0.16,0.26,0.16), new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.6 }));
+                    eq.position.set(0.5+dx, 1.02, -3.2); rg.add(eq);
+                }
+                // Blue lab ambient
+                const labAmbient = new THREE.PointLight(0x2244cc, 2.2, 10); labAmbient.position.set(0.5, 4, -2); rg.add(labAmbient);
+                const labGlow = new THREE.PointLight(0x00e8c0, 1.5, 8); labGlow.position.set(0.5, 1.2, -3.2); rg.add(labGlow);
+            } else if (roomKey === 'arcade') {
+                // Arcade Room — neon cabinets, LED strips, glowing screens
+                const arcadeFloorM = new THREE.MeshStandardMaterial({ color: 0x0a0a14, roughness: 0.7 });
+                const arcadeFloor = new THREE.Mesh(new THREE.PlaneGeometry(10, 10), arcadeFloorM);
+                arcadeFloor.rotation.x = -Math.PI / 2; arcadeFloor.position.y = 0.001; rg.add(arcadeFloor);
+                // Arcade cabinets (left wall row)
+                const cabinetColors = [0xff0080, 0x00ccff, 0xffcc00, 0x00ff88];
+                for (let c = 0; c < 4; c++) {
+                    const col = cabinetColors[c];
+                    const cab = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.6, 0.6), new THREE.MeshStandardMaterial({ color: 0x1a1a2a, roughness: 0.6, metalness: 0.3 }));
+                    cab.position.set(-4.4 + c * 0.85, 0.8, -4.2); rg.add(cab);
+                    const screen = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.4), new THREE.MeshBasicMaterial({ color: col, opacity: 0.9, transparent: true }));
+                    screen.position.set(-4.4 + c * 0.85, 1.2, -3.9); rg.add(screen);
+                    const glow = new THREE.PointLight(col, 1.8, 3.5); glow.position.set(-4.4 + c * 0.85, 1.1, -3.5); rg.add(glow);
+                }
+                // LED floor strip
+                for (let i = -4; i <= 4; i += 2) {
+                    const strip = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.04, 0.08), new THREE.MeshBasicMaterial({ color: i % 4 === 0 ? 0xff00aa : 0x00aaff }));
+                    strip.position.set(i, 0.02, -1.5); rg.add(strip);
+                }
+                // Neon ceiling light
+                const neonR = new THREE.PointLight(0xff00cc, 2.5, 12); neonR.position.set(-2, 5, 0); rg.add(neonR);
+                const neonB = new THREE.PointLight(0x00ccff, 2.5, 12); neonB.position.set(2, 5, 0); rg.add(neonB);
+                // Bean bag seats
+                for (const [bx, bz] of [[1.5,-1.0],[2.8,-1.5]]) {
+                    const bag = new THREE.Mesh(new THREE.SphereGeometry(0.38, 10, 8), new THREE.MeshStandardMaterial({ color: 0x3a1a4a, roughness: 0.9 }));
+                    bag.scale.y = 0.65; bag.position.set(bx, 0.25, bz); rg.add(bag);
+                }
+            } else if (roomKey === 'board_game') {
+                // Board Game Room — warm table, shelved games, pendant lamp
+                const tableTopM = new THREE.MeshStandardMaterial({ color: 0x5a3520, roughness: 0.55, metalness: 0.1 });
+                const tableTop = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.1, 1.6), tableTopM);
+                tableTop.position.set(0, 0.72, -2.0); rg.add(tableTop);
+                for (const [tx, tz] of [[-1.05,-0.7],[1.05,-0.7],[-1.05,0.7],[1.05,0.7]]) {
+                    const tleg = new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.04,0.7,8), new THREE.MeshStandardMaterial({ color: 0x3a2010, roughness: 0.7 }));
+                    tleg.position.set(tx, 0.35, -2.0+tz); rg.add(tleg);
+                }
+                // Game pieces on table (colorful)
+                for (const [px, pz, col] of [[-0.4,0,0xcc2222],[0.4,0,0x2244cc],[0,-0.3,0x22aa44],[0,0.3,0xaaaa00]]) {
+                    const piece = new THREE.Mesh(new THREE.CylinderGeometry(0.06,0.07,0.14,10), new THREE.MeshStandardMaterial({ color: col, roughness: 0.6 }));
+                    piece.position.set(px, 0.79, -2.0+pz); rg.add(piece);
+                }
+                // Two armchairs
+                for (const [cx, side] of [[-1.8,1],[1.8,-1]]) {
+                    const chair = new THREE.Mesh(new THREE.BoxGeometry(0.75,0.55,0.75), new THREE.MeshStandardMaterial({ color: 0x6a4a2a, roughness: 0.8 }));
+                    chair.position.set(cx, 0.28, -2.0); rg.add(chair);
+                    const back = new THREE.Mesh(new THREE.BoxGeometry(0.75,0.7,0.15), new THREE.MeshStandardMaterial({ color: 0x5a3a1a, roughness: 0.8 }));
+                    back.position.set(cx, 0.63, -2.0 + side*0.3); rg.add(back);
+                }
+                // Game shelves (back wall)
+                const shelfM = new THREE.MeshStandardMaterial({ color: 0x4a2e10, roughness: 0.7 });
+                for (let row = 0; row < 3; row++) {
+                    const shelf = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.06, 0.35), shelfM);
+                    shelf.position.set(0.5, 0.6 + row * 0.65, -4.84); rg.add(shelf);
+                    for (let b = 0; b < 5; b++) {
+                        const boxColor = [0xcc3030,0x3060cc,0x308840,0xddaa22,0x882288][b];
+                        const gameBox = new THREE.Mesh(new THREE.BoxGeometry(0.5,0.38,0.32), new THREE.MeshStandardMaterial({ color: boxColor, roughness: 0.8 }));
+                        gameBox.position.set(0.5 - 1.1 + b * 0.55, 0.82 + row * 0.65, -4.84); rg.add(gameBox);
+                    }
+                }
+                // Pendant lamp over table
+                const cord = new THREE.Mesh(new THREE.CylinderGeometry(0.01,0.01,1.8,6), new THREE.MeshStandardMaterial({ color: 0x222222 }));
+                cord.position.set(0, 5.1, -2.0); rg.add(cord);
+                const shade = new THREE.Mesh(new THREE.ConeGeometry(0.38,0.35,16,1,true), new THREE.MeshStandardMaterial({ color: 0xcc9944, roughness: 0.5, side: THREE.DoubleSide }));
+                shade.position.set(0, 4.1, -2.0); rg.add(shade);
+                const pendantLight = new THREE.PointLight(0xffdd88, 3.5, 8); pendantLight.position.set(0, 3.9, -2.0); rg.add(pendantLight);
+            } else if (roomKey === 'library') {
+                // Library — floor-to-ceiling shelves both sides, reading chair, amber lamp
+                const shelfWoodM = new THREE.MeshStandardMaterial({ color: 0x3a2408, roughness: 0.65 });
+                // Left shelves
+                for (let row = 0; row < 5; row++) {
+                    const shelf = new THREE.Mesh(new THREE.BoxGeometry(0.22,0.06,4.5), shelfWoodM);
+                    shelf.position.set(-4.89, 0.4 + row * 0.9, -2.0); rg.add(shelf);
+                    for (let b = 0; b < 7; b++) {
+                        const bookColor = [0xcc2020,0x2060cc,0x208840,0xccaa20,0x882288,0xcc6020,0x208888][b];
+                        const book = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.46+Math.random()*0.18, 0.28), new THREE.MeshStandardMaterial({ color: bookColor, roughness: 0.75 }));
+                        book.position.set(-4.74, 0.7 + row * 0.9, -4.0 + b * 0.62); rg.add(book);
+                    }
+                }
+                // Right shelves
+                for (let row = 0; row < 5; row++) {
+                    const shelf = new THREE.Mesh(new THREE.BoxGeometry(0.22,0.06,4.5), shelfWoodM);
+                    shelf.position.set(4.89, 0.4 + row * 0.9, -2.0); rg.add(shelf);
+                    for (let b = 0; b < 7; b++) {
+                        const bookColor = [0xcc4040,0x4080dd,0x40aa60,0xddcc40,0xaa44cc,0xdd8040,0x40aaaa][b];
+                        const book = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.46+Math.random()*0.18, 0.28), new THREE.MeshStandardMaterial({ color: bookColor, roughness: 0.75 }));
+                        book.position.set(4.74, 0.7 + row * 0.9, -4.0 + b * 0.62); rg.add(book);
+                    }
+                }
+                // Rolling ladder (left side)
+                for (const [ry] of [[0.6],[1.5],[2.4],[3.3]]) {
+                    const rung = new THREE.Mesh(new THREE.CylinderGeometry(0.018,0.018,0.7,8), new THREE.MeshStandardMaterial({ color: 0x6a4820, roughness: 0.5, metalness: 0.3 }));
+                    rung.rotation.z = Math.PI/2; rung.position.set(-4.55, ry, -4.2); rg.add(rung);
+                }
+                // Reading armchair
+                const chairM = new THREE.MeshStandardMaterial({ color: 0x6a3a18, roughness: 0.82 });
+                const chair = new THREE.Mesh(new THREE.BoxGeometry(0.85,0.52,0.82), chairM);
+                chair.position.set(2.4, 0.26, -1.2); rg.add(chair);
+                const chairBack = new THREE.Mesh(new THREE.BoxGeometry(0.85,0.78,0.16), chairM.clone());
+                chairBack.position.set(2.4, 0.65, -1.58); rg.add(chairBack);
+                // Side table + book
+                const sideTable = new THREE.Mesh(new THREE.CylinderGeometry(0.22,0.22,0.5,12), new THREE.MeshStandardMaterial({ color: 0x4a2c10, roughness: 0.6 }));
+                sideTable.position.set(3.4, 0.25, -1.2); rg.add(sideTable);
+                const openBook = new THREE.Mesh(new THREE.BoxGeometry(0.28,0.02,0.22), new THREE.MeshStandardMaterial({ color: 0xf0e8d0, roughness: 0.9 }));
+                openBook.position.set(3.4, 0.52, -1.2); rg.add(openBook);
+                // Amber floor lamp
+                const lampPole = new THREE.Mesh(new THREE.CylinderGeometry(0.022,0.028,1.6,8), new THREE.MeshStandardMaterial({ color: 0x5a4020, roughness: 0.4, metalness: 0.6 }));
+                lampPole.position.set(3.5, 0.8, -0.5); rg.add(lampPole);
+                const lampShade2 = new THREE.Mesh(new THREE.CylinderGeometry(0.3,0.18,0.42,14), new THREE.MeshStandardMaterial({ color: 0xf0d080, roughness: 0.55, emissive: 0xffcc60, emissiveIntensity: 0.45 }));
+                lampShade2.position.set(3.5, 1.7, -0.5); rg.add(lampShade2);
+                const libLight = new THREE.PointLight(0xffcc60, 3.0, 7); libLight.position.set(3.5, 1.7, -0.5); rg.add(libLight);
                 }
             } else {
                 // Living room: warm cozy space with visible furniture
@@ -22876,7 +23090,16 @@ HTML_TEMPLATE = """
                     // Override by explicit location — but NEVER override day-room with bedroom if awake
                     if (decorLocation === 'science-lab') {
                         activity = 'working';
-                        room = 'working';
+                        room = 'science_lab';
+                    } else if (decorLocation === 'arcade-room') {
+                        activity = 'gaming';
+                        room = 'arcade';
+                    } else if (decorLocation === 'board-game-room') {
+                        activity = 'gaming';
+                        room = 'board_game';
+                    } else if (decorLocation === 'library') {
+                        activity = 'reading';
+                        room = 'library';
                     } else if (decorLocation === 'kitchen' || envRoom === 'kitchen') {
                         room = 'kitchen';
                     } else if (['yard', 'outside', 'city-center', 'forest-trail', 'coastline', 'garden', 'porch', 'skydeck'].includes(decorLocation)) {
@@ -22896,7 +23119,7 @@ HTML_TEMPLATE = """
 
                     const tag = document.getElementById('aurionActivityTag');
                     if (tag) {
-                        const icons = { sleeping: '&#128564;&nbsp;Sleeping', dreaming: '&#127769;&nbsp;Dreaming', working: '&#128300;&nbsp;Lab', exploring: '&#127968;&nbsp;Roaming', idle: '&#10024;&nbsp;Present' };
+                        const icons = { sleeping: '&#128564;&nbsp;Sleeping', dreaming: '&#127769;&nbsp;Dreaming', working: '&#128300;&nbsp;Lab', gaming: '&#127918;&nbsp;Gaming', reading: '&#128218;&nbsp;Reading', exploring: '&#127968;&nbsp;Roaming', idle: '&#10024;&nbsp;Present' };
                         tag.innerHTML = icons[activity] || '&#10024;&nbsp;Present';
                     }
                 } catch {}
@@ -26349,6 +26572,12 @@ HTML_TEMPLATE = """
             let pool = GAME_CATALOG;
             if (isNight) {
                 pool = GAME_CATALOG.filter((g) => ['riddle', 'trivia', 'story', 'would-you-rather', 'memory-flash', 'tic-tac-toe'].includes(g.id));
+            } else if (location === 'arcade-room') {
+                pool = GAME_CATALOG.filter((g) => ['rps', 'dice-duel', 'coin-race', 'high-low', 'speed-typing', 'emoji-guess', 'math-rush'].includes(g.id));
+            } else if (location === 'board-game-room') {
+                pool = GAME_CATALOG.filter((g) => ['tic-tac-toe', 'number-guess', 'word-scramble', 'anagram', 'word-ladder-lite', 'logic-mini', 'odd-one-out', 'category-rush'].includes(g.id));
+            } else if (location === 'library') {
+                pool = GAME_CATALOG.filter((g) => ['trivia', 'riddle', 'story-chain', 'would-you-rather', 'memory-flash', 'anagram'].includes(g.id));
             } else if (location === 'yard' || location === 'garden') {
                 pool = GAME_CATALOG.filter((g) => ['coin-race', 'dice-duel', 'high-low', 'word-scramble', 'emoji-guess', 'category-rush'].includes(g.id));
             } else if (location === 'library' || location === 'studio') {
@@ -27683,7 +27912,7 @@ HTML_TEMPLATE = """
         }
 
         function getWorldDriveLocations() {
-            const pool = new Set(['home', 'yard', 'kitchen', 'porch', 'garden', 'skydeck', 'outside', 'master-bedroom', 'dream-suite', 'science-lab', 'city-center', 'forest-trail', 'coastline']);
+            const pool = new Set(['home', 'yard', 'kitchen', 'porch', 'garden', 'skydeck', 'outside', 'master-bedroom', 'dream-suite', 'science-lab', 'arcade-room', 'board-game-room', 'library', 'city-center', 'forest-trail', 'coastline']);
             (homeState.decor.houseAdditions || []).forEach((item) => {
                 if (item?.zoneKey) pool.add(String(item.zoneKey));
             });
@@ -32200,23 +32429,29 @@ HTML_TEMPLATE = """
         };
 
         const _HOME_ROOM_DESCS = {
-            living_room: 'Open living room with stone fireplace, plush seating, and large windows.',
-            kitchen:     'Full kitchen with island, stocked pantry, warm under-cabinet lighting.',
-            dining_room: 'Cozy dining space, open to kitchen, hardwood floors, natural light.',
-            bathroom_1:  'Full bath with tub/shower on the lower level.',
-            foyer:       'Entry foyer with coat closet, bench, view of staircase.',
-            master_bedroom: 'Spacious master bedroom with walk-in closet and soft lighting.',
-            bedroom_2:   'Comfortable second bedroom with queen bed and window seat.',
-            bedroom_3:   'Third bedroom â€” guest room, studio, or personal space.',
-            bathroom_2:  'Upper bathroom shared by bedrooms 2 and 3.',
-            hallway:     'Landing hallway connecting staircase to all upper rooms.',
-            utility_room:'Furnace, central AC, water heater, and laundry.',
+            living_room:     'Open living room with stone fireplace, plush seating, and large windows.',
+            kitchen:         'Full kitchen with island, stocked pantry, warm under-cabinet lighting.',
+            dining_room:     'Cozy dining space, open to kitchen, hardwood floors, natural light.',
+            bathroom_1:      'Full bath with tub/shower on the lower level.',
+            foyer:           'Entry foyer with coat closet, bench, view of staircase.',
+            master_bedroom:  'Spacious master bedroom with walk-in closet and soft lighting.',
+            bedroom_2:       'Comfortable second bedroom with queen bed and window seat.',
+            bedroom_3:       'Third bedroom — guest room, studio, or personal space.',
+            bathroom_2:      'Upper bathroom shared by bedrooms 2 and 3.',
+            hallway:         'Landing hallway connecting staircase to all upper rooms.',
+            utility_room:    'Furnace, central AC, water heater, and laundry.',
+            science_lab:     'Aurion\'s personal science lab — glowing equipment, dual monitors, specimen shelves, and a humming centrifuge in the corner.',
+            arcade_room:     'A neon-lit arcade room with glowing cabinet art, joystick stations, LED floor strips, and a rumbling subwoofer.',
+            board_game_room: 'A warm board game room with shelved box sets, a wide play table under a pendant lamp, and two overstuffed chairs.',
+            library:         'A floor-to-ceiling library with rolling ladder rails, amber reading lamps, and an armchair tucked beside the window.',
         };
         const _HOME_ROOM_NAMES = {
             living_room:'Living Room', kitchen:'Kitchen', dining_room:'Dining Room',
             bathroom_1:'Bathroom (lower)', foyer:'Foyer / Entry',
             master_bedroom:'Master Bedroom', bedroom_2:'Bedroom 2', bedroom_3:'Bedroom 3',
             bathroom_2:'Upper Bathroom', hallway:'Upper Hallway', utility_room:'Utility Room',
+            science_lab:'Science Lab', arcade_room:'Arcade Room',
+            board_game_room:'Board Game Room', library:'Library',
         };
 
         function _formatSolarPhase(phase) {
@@ -32890,6 +33125,14 @@ HTML_TEMPLATE = """
                             : 'home';
                     } else if (roomId === 'utility_room' || roomId === 'foyer' || roomId === 'living_room' || roomId === 'dining_room' || roomId === 'bathroom_1') {
                         locationHint = 'home';
+                    } else if (roomId === 'science_lab') {
+                        locationHint = 'science-lab';
+                    } else if (roomId === 'arcade_room') {
+                        locationHint = 'arcade-room';
+                    } else if (roomId === 'board_game_room') {
+                        locationHint = 'board-game-room';
+                    } else if (roomId === 'library') {
+                        locationHint = 'library';
                     }
                     homeState.decor.location = locationHint;
                     saveAurionActivityState(`with you in ${rName}`, {
