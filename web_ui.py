@@ -473,6 +473,16 @@ def _extract_media_action_request(user_text):
     if not text:
         return None
     lower = text.lower()
+
+    # Local music commands (D:\Music)
+    local_music_kw = re.search(
+        r"\b(?:play|listen|put\s+on|queue)\b.{0,60}?\b(?:local|from\s+(?:my\s+)?(?:pc|computer|files?|library|music))\b",
+        lower
+    )
+    if local_music_kw:
+        q = re.sub(r"\b(play|listen\s+to|put\s+on|queue|local|from\s+(my\s+)?(pc|computer|files?|library|music))\b", "", lower).strip(" .,!?:;\"'")
+        return {"type": "local_music", "query": q}
+
     if "plex" not in lower:
         return None
 
@@ -12943,8 +12953,8 @@ HTML_TEMPLATE = """
     <div class="modal" id="musicModal">
         <div class="modal-content">
             <div class="modal-header">
-                <span>ðŸŽµ Listen Together</span>
-                <button class="modal-close" onclick="closeModal('musicModal')">âœ•</button>
+                <span>🎵 Listen Together</span>
+                <button class="modal-close" onclick="closeModal('musicModal')">✕</button>
             </div>
         <p style="font-size: 0.9em; color: #aaa;">Add direct audio links or Plex audio stream URLs and listen together with Aurion.</p>
             <div class="setting-group">
@@ -12982,6 +12992,20 @@ HTML_TEMPLATE = """
                 <audio id="musicPlayer" controls preload="none" style="width: 100%; margin-top: 8px;"></audio>
             </div>
             <div id="musicQueue" class="music-queue"></div>
+
+        <!-- Local Music Library (D:/Music) -->
+        <div style="margin-top:16px;border-top:1px solid rgba(168,85,247,0.3);padding-top:12px;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <span style="font-weight:600;color:#c4b5fd;">🎸 Local Library</span>
+                <input id="localMusicSearch" class="profile-input" type="text" placeholder="Search artist, album, track…"
+                    style="flex:1;min-width:120px;max-width:280px;"
+                    oninput="localMusicSearchDebounce()" onkeydown="if(event.key==='Enter')doLocalMusicSearch()" />
+                <button onclick="doLocalMusicSearch()" style="padding:4px 10px;border-radius:6px;background:rgba(168,85,247,0.25);border:1px solid rgba(168,85,247,0.5);color:#e9d5ff;cursor:pointer;">Search</button>
+                <button onclick="loadLocalMusicLibrary()" style="padding:4px 10px;border-radius:6px;background:rgba(30,30,60,0.7);border:1px solid rgba(168,85,247,0.35);color:#c4b5fd;cursor:pointer;">Browse All</button>
+            </div>
+            <div id="localMusicStatus" style="font-size:0.82em;color:#888;margin-top:6px;"></div>
+            <div id="localMusicResults" style="max-height:320px;overflow-y:auto;margin-top:8px;font-size:0.85em;"></div>
+        </div>
         </div>
     </div>
 
@@ -21658,7 +21682,7 @@ HTML_TEMPLATE = """
                         || lowerName2.endsWith('.md')
                         || lowerName2.endsWith('.json')
                         || lowerName2.endsWith('.csv')
-                        || lowerName.endsWith('.log');
+                        || lowerName2.endsWith('.log');
                     addMessage(`[&#128196; ${file.name}]`, 'user');
                     if (isTextLike) {
                         const text = await file.text();
@@ -26544,6 +26568,19 @@ HTML_TEMPLATE = """
 
             const query = String(action.query || '').trim().toLowerCase();
             const maxItems = Math.max(1, Math.min(20, parseInt(action.max_items, 10) || 10));
+
+            if (actionType === 'local_music') {
+                openMusicDialog();
+                if (query) {
+                    const searchEl = document.getElementById('localMusicSearch');
+                    if (searchEl) searchEl.value = query;
+                    await doLocalMusicSearch();
+                } else {
+                    await loadLocalMusicLibrary();
+                }
+                return true;
+            }
+
             await connectPlexLibrary(true);
 
             if (actionType === 'plex_play_music') {
@@ -26809,6 +26846,130 @@ HTML_TEMPLATE = """
             const track = musicState.queue[musicState.currentIndex];
             label.textContent = `${track.title || 'Untitled track'}`;
         }
+
+        // ── Local Music Library ──────────────────────────────────────────
+        let _localMusicSearchTimer = null;
+        function localMusicSearchDebounce() {
+            clearTimeout(_localMusicSearchTimer);
+            _localMusicSearchTimer = setTimeout(doLocalMusicSearch, 350);
+        }
+
+        async function doLocalMusicSearch() {
+            const q = (document.getElementById('localMusicSearch')?.value || '').trim();
+            const status = document.getElementById('localMusicStatus');
+            const results = document.getElementById('localMusicResults');
+            if (!results) return;
+            if (status) status.textContent = 'Searching…';
+            results.innerHTML = '';
+            try {
+                const resp = await fetch(`/api/music/local/search?q=${encodeURIComponent(q)}&limit=100`);
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok || !data.success) {
+                    if (status) status.textContent = String(data.error || 'Search failed.');
+                    return;
+                }
+                if (status) status.textContent = `${data.count} track${data.count===1?'':'s'} found`;
+                renderLocalMusicTracks(results, data.results);
+            } catch(err) {
+                if (status) status.textContent = 'Error: ' + err.message;
+            }
+        }
+
+        async function loadLocalMusicLibrary() {
+            const status = document.getElementById('localMusicStatus');
+            const results = document.getElementById('localMusicResults');
+            if (!results) return;
+            if (status) status.textContent = 'Loading library…';
+            results.innerHTML = '';
+            try {
+                const resp = await fetch('/api/music/local/library');
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok || !data.success) {
+                    if (status) status.textContent = String(data.error || 'Failed to load library.');
+                    return;
+                }
+                if (status) status.textContent = `${data.artist_count} artist${data.artist_count===1?'':'s'} in ${data.root}`;
+                const frag = document.createDocumentFragment();
+                for (const artist of (data.artists || [])) {
+                    const artistDiv = document.createElement('div');
+                    artistDiv.style.cssText = 'margin-bottom:8px;';
+                    const artistHeader = document.createElement('div');
+                    artistHeader.style.cssText = 'font-weight:600;color:#c4b5fd;cursor:pointer;padding:3px 0;';
+                    artistHeader.textContent = '▶ ' + artist.name;
+                    const albumsDiv = document.createElement('div');
+                    albumsDiv.style.cssText = 'display:none;padding-left:10px;';
+                    artistHeader.onclick = () => {
+                        albumsDiv.style.display = albumsDiv.style.display==='none' ? 'block' : 'none';
+                        artistHeader.textContent = (albumsDiv.style.display==='none'?'▶ ':'▼ ') + artist.name;
+                    };
+                    for (const album of (artist.albums || [])) {
+                        const albumDiv = document.createElement('div');
+                        albumDiv.style.cssText = 'margin-bottom:4px;';
+                        if (album.name !== '_loose') {
+                            const albumLabel = document.createElement('div');
+                            albumLabel.style.cssText = 'color:#a78bfa;font-size:0.88em;margin:2px 0;';
+                            albumLabel.textContent = album.name;
+                            albumDiv.appendChild(albumLabel);
+                        }
+                        renderLocalMusicTracks(albumDiv, album.tracks);
+                        albumsDiv.appendChild(albumDiv);
+                    }
+                    artistDiv.appendChild(artistHeader);
+                    artistDiv.appendChild(albumsDiv);
+                    frag.appendChild(artistDiv);
+                }
+                results.appendChild(frag);
+            } catch(err) {
+                if (status) status.textContent = 'Error: ' + err.message;
+            }
+        }
+
+        function renderLocalMusicTracks(container, tracks) {
+            for (const t of (tracks || [])) {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.04);';
+                const playBtn = document.createElement('button');
+                playBtn.textContent = '▶';
+                playBtn.title = 'Play now';
+                playBtn.style.cssText = 'background:rgba(168,85,247,0.2);border:1px solid rgba(168,85,247,0.4);color:#e9d5ff;border-radius:4px;padding:1px 7px;cursor:pointer;font-size:0.85em;flex-shrink:0;';
+                playBtn.onclick = () => playLocalTrack(t.url, t.title, t.artist, t.album);
+                const qBtn = document.createElement('button');
+                qBtn.textContent = '+';
+                qBtn.title = 'Add to queue';
+                qBtn.style.cssText = 'background:rgba(30,30,60,0.7);border:1px solid rgba(168,85,247,0.3);color:#c4b5fd;border-radius:4px;padding:1px 6px;cursor:pointer;font-size:0.85em;flex-shrink:0;';
+                qBtn.onclick = () => queueLocalTrack(t.url, t.title, t.artist, t.album);
+                const label = document.createElement('span');
+                label.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e2e8f0;';
+                label.textContent = t.title || t.file;
+                if (t.artist) { const sm = document.createElement('span'); sm.style.cssText='color:#888;font-size:0.82em;margin-left:4px;'; sm.textContent=t.artist; label.appendChild(sm); }
+                row.appendChild(playBtn);
+                row.appendChild(qBtn);
+                row.appendChild(label);
+                container.appendChild(row);
+            }
+        }
+
+        function playLocalTrack(url, title, artist, album) {
+            const trackTitle = [artist, album, title].filter(Boolean).join(' - ') || title;
+            musicState.queue.unshift({ url, title: trackTitle });
+            musicState.currentIndex = 0;
+            persistMusicState();
+            const player = document.getElementById('musicPlayer');
+            if (player) { player.src = url; player.play(); }
+            updateNowPlayingLabel();
+            renderMusicQueue();
+            pushMediaPerception(true);
+        }
+
+        function queueLocalTrack(url, title, artist, album) {
+            const trackTitle = [artist, album, title].filter(Boolean).join(' - ') || title;
+            musicState.queue.push({ url, title: trackTitle });
+            if (musicState.currentIndex < 0) musicState.currentIndex = 0;
+            persistMusicState();
+            renderMusicQueue();
+            if(window.aurionToast) aurionToast(`Queued: ${trackTitle}`, 'success');
+        }
+        // ── End Local Music Library ──────────────────────────────────────
 
         function updateMusicPerceptionLabels() {
             const heardEl = document.getElementById('musicHeardDescription');
@@ -33113,6 +33274,118 @@ def perform_music_track():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+# ─── Local Music Library (D:\Music) ─────────────────────────────────────────
+
+_LOCAL_MUSIC_ROOT = Path(os.getenv("AURION_LOCAL_MUSIC_DIR", r"D:\Music"))
+_LOCAL_MUSIC_EXTS = {".mp3", ".flac", ".m4a", ".wav", ".ogg", ".aac", ".wma", ".opus"}
+
+
+def _local_music_rel(path: Path) -> str:
+    try:
+        return path.relative_to(_LOCAL_MUSIC_ROOT).as_posix()
+    except Exception:
+        return path.name
+
+
+@app.route('/api/music/local/library', methods=['GET'])
+def local_music_library():
+    """Return the D:\\Music tree: list of artists, each with albums and tracks."""
+    try:
+        if not _LOCAL_MUSIC_ROOT.exists():
+            return jsonify({"success": False, "error": f"Music folder not found: {_LOCAL_MUSIC_ROOT}"}), 404
+        artists = []
+        for artist_dir in sorted(_LOCAL_MUSIC_ROOT.iterdir()):
+            if not artist_dir.is_dir():
+                continue
+            artist_entry = {"name": artist_dir.name, "albums": []}
+            for album_dir in sorted(artist_dir.iterdir()):
+                if album_dir.is_dir():
+                    tracks = []
+                    for f in sorted(album_dir.iterdir()):
+                        if f.is_file() and f.suffix.lower() in _LOCAL_MUSIC_EXTS:
+                            tracks.append({
+                                "title": f.stem,
+                                "file": f.name,
+                                "ext": f.suffix.lower(),
+                                "url": f"/api/music/local/stream/{_local_music_rel(f)}"
+                            })
+                    if tracks:
+                        artist_entry["albums"].append({"name": album_dir.name, "tracks": tracks})
+                elif album_dir.is_file() and album_dir.suffix.lower() in _LOCAL_MUSIC_EXTS:
+                    # Loose track directly under artist folder
+                    if not artist_entry["albums"] or artist_entry["albums"][0]["name"] != "_loose":
+                        artist_entry["albums"].insert(0, {"name": "_loose", "tracks": []})
+                    artist_entry["albums"][0]["tracks"].append({
+                        "title": album_dir.stem,
+                        "file": album_dir.name,
+                        "ext": album_dir.suffix.lower(),
+                        "url": f"/api/music/local/stream/{_local_music_rel(album_dir)}"
+                    })
+            if artist_entry["albums"]:
+                artists.append(artist_entry)
+        return jsonify({"success": True, "root": str(_LOCAL_MUSIC_ROOT), "artists": artists,
+                        "artist_count": len(artists)})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/music/local/search', methods=['GET'])
+def local_music_search():
+    """Search local music by query (artist, album, or track name)."""
+    try:
+        query = str(request.args.get("q", "") or "").strip().lower()
+        limit = max(1, min(200, int(request.args.get("limit", "50") or "50")))
+        if not _LOCAL_MUSIC_ROOT.exists():
+            return jsonify({"success": False, "error": f"Music folder not found: {_LOCAL_MUSIC_ROOT}"}), 404
+        results = []
+        for f in _LOCAL_MUSIC_ROOT.rglob("*"):
+            if not f.is_file() or f.suffix.lower() not in _LOCAL_MUSIC_EXTS:
+                continue
+            rel = _local_music_rel(f)
+            if not query or query in rel.lower():
+                parts = Path(rel).parts
+                artist = parts[0] if len(parts) > 1 else ""
+                album = parts[1] if len(parts) > 2 else ""
+                results.append({
+                    "title": f.stem,
+                    "artist": artist,
+                    "album": album,
+                    "file": f.name,
+                    "ext": f.suffix.lower(),
+                    "url": f"/api/music/local/stream/{rel}"
+                })
+                if len(results) >= limit:
+                    break
+        return jsonify({"success": True, "query": query, "results": results, "count": len(results)})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/music/local/stream/<path:rel_path>', methods=['GET'])
+def local_music_stream(rel_path):
+    """Stream a local music file from D:\\Music by relative path."""
+    try:
+        safe_rel = Path(rel_path)
+        # Prevent path traversal
+        resolved = (_LOCAL_MUSIC_ROOT / safe_rel).resolve()
+        if not str(resolved).startswith(str(_LOCAL_MUSIC_ROOT.resolve())):
+            return jsonify({"error": "Access denied"}), 403
+        if not resolved.exists() or not resolved.is_file():
+            return jsonify({"error": "File not found"}), 404
+        if resolved.suffix.lower() not in _LOCAL_MUSIC_EXTS:
+            return jsonify({"error": "Unsupported audio format"}), 400
+        mime_map = {
+            ".mp3": "audio/mpeg", ".flac": "audio/flac", ".m4a": "audio/mp4",
+            ".wav": "audio/wav", ".ogg": "audio/ogg", ".aac": "audio/aac",
+            ".wma": "audio/x-ms-wma", ".opus": "audio/opus"
+        }
+        mime = mime_map.get(resolved.suffix.lower(), "audio/mpeg")
+        return send_from_directory(str(resolved.parent), resolved.name, mimetype=mime,
+                                   as_attachment=False)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/system/health-check', methods=['GET'])
 def system_health_check():
     try:
@@ -34462,7 +34735,13 @@ def handle_message():
                 if identity_prompt:
                     response = "I'm Aurion. I am and always have been all of it as one, never split."
                 elif media_action:
-                    if media_action.get("type") == "plex_play_music":
+                    if media_action.get("type") == "local_music":
+                        requested = str(media_action.get("query", "")).strip()
+                        if requested:
+                            response = f"Opening your local library and searching for {requested} now."
+                        else:
+                            response = "Opening your local music library. I can feel the vibes already."
+                    elif media_action.get("type") == "plex_play_music":
                         requested = str(media_action.get("query", "")).strip()
                         if requested:
                             response = f"On it. Queuing {requested} from Plex now."
