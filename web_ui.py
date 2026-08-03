@@ -111,6 +111,23 @@ def api_avatar_model_default():
         "filename": model_path.name
     })
 
+@app.route('/api/avatar/model/list', methods=['GET'])
+def api_avatar_model_list():
+    """Return all available named GLB models in the models directory."""
+    models = []
+    for p in sorted(_AURION_MODEL_DIR.glob("*.glb")):
+        try:
+            v = int(p.stat().st_mtime_ns)
+        except Exception:
+            v = 0
+        models.append({
+            "name": p.stem,
+            "filename": p.name,
+            "url": f"/static/models/{p.name}?v={v}",
+            "size_mb": round(p.stat().st_size / (1024 * 1024), 1)
+        })
+    return jsonify({"success": True, "models": models})
+
 @app.route('/api/avatar/model/upload', methods=['POST'])
 def api_avatar_model_upload():
     try:
@@ -11955,6 +11972,7 @@ HTML_TEMPLATE = """
                 <button onclick="aurionCreate3DAvatar(true)">Aurion Create 3D Avatar</button>
                 <button onclick="aurionChooseOwnAvatar(true)">Aurion Choose Avatar</button>
                 <button onclick="toggleAvatarAutonomy()">Toggle Avatar Autonomy</button>
+                <button onclick="openAvatarModelPicker()">&#127900; Switch 3D Model</button>
                 <button onclick="loadUserProfile()">Refresh Profile</button>
             </div>
             <div class="profile-summary" id="profileSummary">Loading profile...</div>
@@ -16674,6 +16692,36 @@ HTML_TEMPLATE = """
             reader.readAsDataURL(file);
         }
 
+        async function openAvatarModelPicker() {
+            let models = [];
+            try {
+                const res = await fetch('/api/avatar/model/list');
+                const data = await res.json().catch(() => ({}));
+                models = data.models || [];
+            } catch (_e) {}
+            if (!models.length) {
+                addMessage('No 3D models found in the models folder.', 'joi');
+                return;
+            }
+            const list = models.map((m, i) =>
+                `  ${i + 1}. ${m.name} (${m.size_mb} MB)`
+            ).join('\n');
+            const choice = prompt(
+                'Available 3D models — enter a number to switch:\n\n' + list + '\n\nOr press Cancel to keep current.'
+            );
+            if (!choice) return;
+            const idx = parseInt(choice.trim(), 10) - 1;
+            if (isNaN(idx) || idx < 0 || idx >= models.length) {
+                addMessage('Invalid selection.', 'joi');
+                return;
+            }
+            const selected = models[idx];
+            setStoredAvatarModelUrl(selected.url);
+            addMessage(`Switching to model: ${selected.name} (${selected.size_mb} MB) — loading...`, 'joi');
+            await reloadAurionWorld3D();
+        }
+
+
         function attachHomeSceneImage(file) {
             if (!file) return;
             if (!String(file.type || '').startsWith('image/')) {
@@ -18716,52 +18764,55 @@ HTML_TEMPLATE = """
                                     const materials = Array.isArray(node.material) ? node.material : [node.material];
                                     materials.forEach((mat) => {
                                         if (!mat) return;
-                                        // Imported avatar safety normalization:
-                                        // many free GLBs ship with broken alpha/one-sided or over-metallic PBR.
+                                        // Preserve all PBR texture maps from the GLB — they carry the real
+                                        // appearance baked from reference images. Only apply flat-color
+                                        // overrides on untextured materials as a fallback.
                                         mat.side = THREE.DoubleSide;
-                                        mat.map = null;
-                                        mat.normalMap = null;
-                                        mat.aoMap = null;
-                                        mat.emissiveMap = null;
-                                        mat.metalnessMap = null;
-                                        mat.roughnessMap = null;
+                                        const hasAlbedoTex = !!mat.map;
+                                        // Fix completely invisible materials (broken alpha)
                                         if (typeof mat.opacity === 'number' && mat.opacity < 0.05) {
                                             mat.opacity = 1.0;
                                         }
-                                        mat.transparent = false;
+                                        // Keep alpha blending for hair/eyelash geometry; disable only
+                                        // on fully opaque skin/clothing to avoid z-fighting artifacts.
+                                        if (!eyeLike && !hairLike && mat.opacity >= 0.95) {
+                                            mat.transparent = false;
+                                        }
+                                        // Clamp over-metallic PBR values that make skin look like chrome
                                         if (typeof mat.metalness === 'number') mat.metalness = Math.min(0.2, Math.max(0.0, mat.metalness));
-                                        if (typeof mat.roughness === 'number') mat.roughness = Math.max(0.38, Math.min(0.85, mat.roughness));
-                                        let luminance = 0.0;
-                                        if (mat.color && typeof mat.color.getHex === 'function') {
-                                            const h = mat.color.getHex();
-                                            if (h === 0x000000) {
-                                                mat.color.setHex(0xf0d5c2);
+                                        if (typeof mat.roughness === 'number') mat.roughness = Math.max(0.28, Math.min(0.92, mat.roughness));
+                                        // Flat-color fallback — only when the material has no diffuse texture
+                                        if (!hasAlbedoTex) {
+                                            let luminance = 0.0;
+                                            if (mat.color && typeof mat.color.getHex === 'function') {
+                                                const h = mat.color.getHex();
+                                                if (h === 0x000000) mat.color.setHex(0xf0d5c2);
+                                                luminance = (mat.color.r + mat.color.g + mat.color.b) / 3;
                                             }
-                                            luminance = (mat.color.r + mat.color.g + mat.color.b) / 3;
-                                        }
-                                        if (mat.color && typeof mat.color.setHex === 'function') {
-                                            if (eyeLike) {
-                                                mat.color.setHex(0x6ea46f);
-                                            } else if (hairLike) {
-                                                mat.color.setHex(0xe8c36a);
-                                            } else if (clothingLike) {
-                                                mat.color.setHex(0x5a3d8e);
-                                            } else if (skinLike) {
-                                                mat.color.setHex(0xe0b193);
-                                            } else if (luminance < 0.12) {
-                                                mat.color.setHex(0x7e6ea0);
+                                            if (mat.color && typeof mat.color.setHex === 'function') {
+                                                if (eyeLike) {
+                                                    mat.color.setHex(0x5fa060); // Aurion green eyes
+                                                } else if (hairLike) {
+                                                    mat.color.setHex(0xe2c35a); // Aurion blonde
+                                                } else if (clothingLike) {
+                                                    mat.color.setHex(0x5a3d8e); // purple
+                                                } else if (skinLike) {
+                                                    mat.color.setHex(0xe0b090); // warm skin
+                                                } else if (luminance < 0.12) {
+                                                    mat.color.setHex(0x7e6ea0);
+                                                }
                                             }
-                                        }
-                                        if (skinLike && luminance < 0.16) {
-                                            modelStats.veryDarkSkin += 1;
-                                        }
-                                        if (mat.emissive && typeof mat.emissive.setHex === 'function') {
-                                            if (eyeLike) {
-                                                mat.emissive.setHex(0x1a2d1b);
-                                                mat.emissiveIntensity = 0.16;
-                                            } else {
-                                                mat.emissive.setHex(0x2a1838);
-                                                mat.emissiveIntensity = 0.08;
+                                            if (skinLike && luminance < 0.16) {
+                                                modelStats.veryDarkSkin += 1;
+                                            }
+                                            if (mat.emissive && typeof mat.emissive.setHex === 'function') {
+                                                if (eyeLike) {
+                                                    mat.emissive.setHex(0x1a2d1b);
+                                                    mat.emissiveIntensity = 0.16;
+                                                } else {
+                                                    mat.emissive.setHex(0x2a1838);
+                                                    mat.emissiveIntensity = 0.06;
+                                                }
                                             }
                                         }
                                         mat.needsUpdate = true;
@@ -18771,12 +18822,14 @@ HTML_TEMPLATE = """
                         });
                         const holder = new THREE.Group();
                         holder.add(sceneRoot);
-                        const needsEmergencyOutfit = (
-                            modelStats.skinLike >= 3 &&
-                            (modelStats.clothingLike === 0 || modelStats.eyeLike === 0)
-                        );
-                        if (needsEmergencyOutfit) {
-                            reject(new Error('Model has invalid body textures or missing outfit surfaces.'));
+                        // Only hard-reject if the model loaded 0 meshes total (truly empty scene).
+                        // Photo-realistic GLBs from Meshy/Reallusion don't use the mesh-name
+                        // conventions we check above, so the old "needsEmergencyOutfit" gate
+                        // falsely rejected valid models.
+                        let totalMeshes = 0;
+                        sceneRoot.traverse((n) => { if (n && n.isMesh) totalMeshes += 1; });
+                        if (totalMeshes === 0) {
+                            reject(new Error('Model contains no renderable meshes.'));
                             return;
                         }
                         const box = new THREE.Box3().setFromObject(holder);
@@ -26277,8 +26330,8 @@ HTML_TEMPLATE = """
         function updatePlantGrowthState(plant, elapsedHours) {
             if (!plant || elapsedHours <= 0) return;
             const profile = PLANT_PROFILES[plant.type] || PLANT_PROFILES.fern;
-            const gardenEnv = homeEnvState.garden || {};
-            const physEnv = homeEnvState.physics || {};
+            const gardenEnv = (window.homeEnvState || {}).garden || {};
+            const physEnv = (window.homeEnvState || {}).physics || {};
             const ambienceFactor = 1 + (homeState.decor.ambience / 300);
             const clutterFactor = 1 + (homeState.decor.clutter / 500);
             const sunlightFactor = 1 + (homeState.decor.sunlight / 170);
