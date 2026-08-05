@@ -10,6 +10,8 @@ system, TTS worker, etc. at module scope) so this whole module pays that
 cost once. AURION_TESTING=1 (set in conftest.py before this import) keeps
 the always-on autonomy/background threads from starting during that import.
 """
+from datetime import datetime
+
 import pytest
 
 web_ui = pytest.importorskip(
@@ -376,6 +378,61 @@ def test_taste_perception_route_locks_home_environment_without_clobbering():
     assert home["kitchen"]["current_dish"] == "Lemon tart"
     # Unrelated key must survive the merge-write.
     assert home["fireplace"] == {"on": True}
+
+
+# ---------------------------------------------------------------------------
+# _update_home_environment: the core autonomy tick, redesigned this batch
+# from five blind whole-dict overwrites (home_environment, world_continuity,
+# life_registry, world_engine, narrative_system) into five separate atomic
+# per-key merge-writes. Seed weather with a fresh last_fetched_at so the
+# tick skips its real network fetch (do_fetch stays False), keeping this
+# test fast and offline.
+# ---------------------------------------------------------------------------
+
+def test_update_home_environment_locks_all_five_keys_without_clobbering():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["home_environment"] = {
+            "weather": {"last_fetched_at": datetime.utcnow().isoformat(), "temp_f": 65.0, "humidity_pct": 45},
+            "fireplace": {"on": True},
+            "location": {"lat": 41.5, "lon": -83.7},
+        }
+        web_ui.app_state["world_continuity"] = {"guardian_presence": {"summons_enabled": True}}
+        life_registry_seed = dict(web_ui._default_life_registry())
+        life_registry_seed["unrelated_marker"] = "keep-me"
+        web_ui.app_state["life_registry"] = life_registry_seed
+        world_engine_seed = dict(web_ui._default_world_engine_state())
+        world_engine_seed["unrelated_marker"] = "keep-me"
+        web_ui.app_state["world_engine"] = world_engine_seed
+        narrative_seed = dict(web_ui._default_narrative_state())
+        narrative_seed["unrelated_marker"] = "keep-me"
+        web_ui.app_state["narrative_system"] = narrative_seed
+
+    result = web_ui._update_home_environment(force_weather=False)
+
+    assert "solar" in result
+    home = web_ui.app_state["home_environment"]
+    assert home is result
+    # fireplace is only ever read by this tick, never recomputed -- must survive.
+    assert home["fireplace"] == {"on": True}
+
+    wc = web_ui.app_state["world_continuity"]
+    assert "offscreen_simulation" in wc
+    assert "spacefaring" in wc
+    assert "synced_at" in wc
+    # Unrelated key must survive the merge-write.
+    assert wc["guardian_presence"] == {"summons_enabled": True}
+
+    life_registry = web_ui.app_state["life_registry"]
+    assert life_registry["unrelated_marker"] == "keep-me"
+
+    world_engine = web_ui.app_state["world_engine"]
+    assert "time_stop_active" in world_engine
+    assert "offscreen_life_simulation" in world_engine
+    assert "spacefaring" in world_engine
+    assert "quest_design" in world_engine
+
+    narrative_system = web_ui.app_state["narrative_system"]
+    assert isinstance(narrative_system, dict)
 
 
 def test_resolve_special_ability_registry_round_trip_via_grant():

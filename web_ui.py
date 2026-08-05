@@ -997,7 +997,13 @@ _VISION_CB_UNTIL = 0.0       # epoch seconds until which vision calls are suppre
 _VISION_CB_FAILS = 0         # consecutive credit-error count
 _VISION_CB_THRESHOLD = 2     # failures before opening breaker
 _VISION_CB_COOLDOWN = 300.0  # seconds to pause after breaker trips
-_APP_STATE_LOCK = threading.Lock()  # Guards background-thread writes to app_state
+_APP_STATE_LOCK = threading.RLock()  # Guards background-thread writes to app_state.
+# RLock (not Lock): several locked resolve/mutate helpers call each other
+# (e.g. _build_spacefaring_state -> _resolve_world_builder_state, both of
+# which acquire this lock) -- with a plain Lock that nesting deadlocks the
+# calling thread the first time it happens. RLock permits the same thread
+# to re-acquire it, which is exactly what these nested call chains need;
+# it behaves identically to Lock for the (much more common) non-nested case.
 _LLM_BUSY = threading.Event()  # Set while a user-message LLM call is in progress
 _BIND_HOST = str(os.getenv("AURION_BIND_HOST", "0.0.0.0" if _ALLOW_REMOTE else "127.0.0.1")).strip() or ("0.0.0.0" if _ALLOW_REMOTE else "127.0.0.1")
 _TLS_CERT_FILE = str(os.getenv("AURION_TLS_CERT_FILE", "")).strip()
@@ -14346,57 +14352,80 @@ def _update_home_environment(force_weather=False):
             "catchup_capped": bool(catchup_capped),
             "summary": f"Autonomy simulation advanced {elapsed_minutes:.2f} minutes of world time."
         }
-        world_continuity = dict(app_state.get("world_continuity") or {})
-        world_continuity["offscreen_simulation"] = _build_offscreen_life_simulation_state(world_continuity, elapsed_minutes)
-        world_continuity["spacefaring"] = _build_spacefaring_state(world_continuity, elapsed_minutes)
-        world_continuity["synced_at"] = now_utc.isoformat()
-        app_state["world_continuity"] = world_continuity
-        # Tick life registry
-        life_reg = dict(app_state.get("life_registry") or _default_life_registry())
-        app_state["life_registry"] = _tick_life_registry(life_reg, home, weather, elapsed_minutes)
-        app_state["world_engine"]  = _build_world_engine_state(
-            home, weather, home.get("solar", {}),
-            app_state["life_registry"],
-            dict(app_state.get("spatial_audio") or {}),
-        )
-        world_engine = dict(app_state.get("world_engine") or {})
-        world_engine["time_stop_active"] = bool(time_control.get("active", False))
-        world_engine["time_stop_elapsed_seconds"] = float((home.get("time_stop_runtime") or {}).get("elapsed_seconds", 0.0) or 0.0)
-        world_engine["time_stop_excluded_entities"] = list(time_control.get("excluded_entities") or [])
-        world_engine["time_stop_note"] = str((home.get("time_stop_runtime") or {}).get("note", "") or "")
-        world_engine["autonomy_elapsed_minutes"] = round(elapsed_minutes, 3)
-        world_engine["offscreen_life_simulation"] = {
-            "enabled": bool((world_continuity.get("offscreen_simulation") or {}).get("enabled", True)),
-            "unseen_npc_count": int((world_continuity.get("offscreen_simulation") or {}).get("unseen_npc_count", 0) or 0),
-            "active_story_threads": int((world_continuity.get("offscreen_simulation") or {}).get("active_story_threads", 0) or 0),
-            "summary": str((world_continuity.get("offscreen_simulation") or {}).get("summary", "") or "")
-        }
-        world_engine["spacefaring"] = {
-            "current_sector": str((world_continuity.get("spacefaring") or {}).get("current_sector", "Sol-Home") or "Sol-Home"),
-            "in_transit": bool(((world_continuity.get("spacefaring") or {}).get("travel_runtime") or {}).get("in_transit", False)),
-            "load_screen_active": bool(((world_continuity.get("spacefaring") or {}).get("load_screen") or {}).get("active", False)),
-            "living_universe_mode": str((((world_continuity.get("spacefaring") or {}).get("universe_liveness") or {}).get("living_universe_mode", "non_interference_discovery")) or "non_interference_discovery"),
-            "discovered_destination_count": int((((world_continuity.get("spacefaring") or {}).get("universe_liveness") or {}).get("discovered_destination_count", 0)) or 0),
-            "summary": str((world_continuity.get("spacefaring") or {}).get("summary", "") or "")
-        }
-        world_engine["quest_design"] = {
-            "earth_mode": str((world_engine.get("procedural_generation") or {}).get("earth_mode", "simulation_first") or "simulation_first"),
-            "space_mode": str((world_engine.get("procedural_generation") or {}).get("space_mode", "action_explorer_first") or "action_explorer_first"),
-            "rank_tiers": list((world_engine.get("procedural_generation") or {}).get("quest_rank_tiers") or ["F", "E", "D", "C", "B", "A", "S", "S+", "S++"]),
-            "summary": "Earth quests bias toward immersive sim-life and bonding, while space quests bias toward action, exploration, and frontier-scale events.",
-        }
-        app_state["world_engine"] = world_engine
+
+        # From here down: each app_state key this tick touches gets its own
+        # atomic, lock-protected merge-write instead of a blind whole-dict
+        # overwrite. This closes the lost-update race between this tick and
+        # a concurrent request handler writing the same key (e.g. a
+        # thermostat/window toggle racing this tick's home_environment
+        # write). It does NOT make all five keys one cross-key transaction
+        # -- that would need a bigger dedicated redesign (a single lock
+        # spanning the whole tick plus every other writer of these five
+        # keys) and is tracked separately if ever needed; this tick's own
+        # inputs (home/weather/time_control) are still a snapshot taken at
+        # the top of this call, same as before.
+        def _apply_wc(wc_inner):
+            wc_inner["offscreen_simulation"] = _build_offscreen_life_simulation_state(wc_inner, elapsed_minutes)
+            wc_inner["spacefaring"] = _build_spacefaring_state(wc_inner, elapsed_minutes)
+            wc_inner["synced_at"] = now_utc.isoformat()
+        world_continuity = _mutate_world_continuity(_apply_wc)
+
+        # Tick life registry: fresh read + write under the same lock
+        # acquisition closes the read-modify-write gap this key had.
+        with _APP_STATE_LOCK:
+            life_reg = dict(app_state.get("life_registry") or _default_life_registry())
+            updated_life_registry = _tick_life_registry(life_reg, home, weather, elapsed_minutes)
+            app_state["life_registry"] = updated_life_registry
+
+        with _APP_STATE_LOCK:
+            world_engine = _build_world_engine_state(
+                home, weather, home.get("solar", {}),
+                updated_life_registry,
+                dict(app_state.get("spatial_audio") or {}),
+            )
+            world_engine["time_stop_active"] = bool(time_control.get("active", False))
+            world_engine["time_stop_elapsed_seconds"] = float((home.get("time_stop_runtime") or {}).get("elapsed_seconds", 0.0) or 0.0)
+            world_engine["time_stop_excluded_entities"] = list(time_control.get("excluded_entities") or [])
+            world_engine["time_stop_note"] = str((home.get("time_stop_runtime") or {}).get("note", "") or "")
+            world_engine["autonomy_elapsed_minutes"] = round(elapsed_minutes, 3)
+            world_engine["offscreen_life_simulation"] = {
+                "enabled": bool((world_continuity.get("offscreen_simulation") or {}).get("enabled", True)),
+                "unseen_npc_count": int((world_continuity.get("offscreen_simulation") or {}).get("unseen_npc_count", 0) or 0),
+                "active_story_threads": int((world_continuity.get("offscreen_simulation") or {}).get("active_story_threads", 0) or 0),
+                "summary": str((world_continuity.get("offscreen_simulation") or {}).get("summary", "") or "")
+            }
+            world_engine["spacefaring"] = {
+                "current_sector": str((world_continuity.get("spacefaring") or {}).get("current_sector", "Sol-Home") or "Sol-Home"),
+                "in_transit": bool(((world_continuity.get("spacefaring") or {}).get("travel_runtime") or {}).get("in_transit", False)),
+                "load_screen_active": bool(((world_continuity.get("spacefaring") or {}).get("load_screen") or {}).get("active", False)),
+                "living_universe_mode": str((((world_continuity.get("spacefaring") or {}).get("universe_liveness") or {}).get("living_universe_mode", "non_interference_discovery")) or "non_interference_discovery"),
+                "discovered_destination_count": int((((world_continuity.get("spacefaring") or {}).get("universe_liveness") or {}).get("discovered_destination_count", 0)) or 0),
+                "summary": str((world_continuity.get("spacefaring") or {}).get("summary", "") or "")
+            }
+            world_engine["quest_design"] = {
+                "earth_mode": str((world_engine.get("procedural_generation") or {}).get("earth_mode", "simulation_first") or "simulation_first"),
+                "space_mode": str((world_engine.get("procedural_generation") or {}).get("space_mode", "action_explorer_first") or "action_explorer_first"),
+                "rank_tiers": list((world_engine.get("procedural_generation") or {}).get("quest_rank_tiers") or ["F", "E", "D", "C", "B", "A", "S", "S+", "S++"]),
+                "summary": "Earth quests bias toward immersive sim-life and bonding, while space quests bias toward action, exploration, and frontier-scale events.",
+            }
+            app_state["world_engine"] = world_engine
+
         # Light-refresh narrative without overwriting player choices
-        ns = dict(app_state.get("narrative_system") or _default_narrative_state())
-        app_state["narrative_system"] = _refresh_narrative_state(ns)
-        app_state["home_environment"] = home
+        with _APP_STATE_LOCK:
+            ns = dict(app_state.get("narrative_system") or _default_narrative_state())
+            app_state["narrative_system"] = _refresh_narrative_state(ns)
+
+        def _apply_home(home_inner):
+            home_inner.update(home)
+        home = _mutate_home_environment_state(_apply_home)
+
         _save_autonomy_runtime_ledger({
             "last_simulated_at": now_utc.isoformat(),
             "last_elapsed_minutes": round(elapsed_minutes, 3),
             "catchup_capped": bool(catchup_capped),
             "offscreen_continuity_enabled": True,
             "time_stop_active": bool(time_control.get("active", False)),
-            "life_registry_active_count": int((app_state.get("life_registry") or {}).get("active_count", 0) or 0),
+            "life_registry_active_count": int((updated_life_registry or {}).get("active_count", 0) or 0),
             "altered_state_runtime": dict(home.get("altered_state_runtime") or {}),
             "vitals": dict(home.get("vitals") or {}),
             "offscreen_simulation": dict(world_continuity.get("offscreen_simulation") or {}),
