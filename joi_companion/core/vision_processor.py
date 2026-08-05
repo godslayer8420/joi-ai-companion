@@ -1,6 +1,15 @@
 import cv2
-import mediapipe as mp
 import math
+
+try:
+    # Try newer mediapipe import style
+    from mediapipe import solutions
+    from mediapipe.framework.formats import landmark_pb2
+    mp = type('mp', (), {})()
+    mp.solutions = solutions
+except (ImportError, AttributeError):
+    # Fall back to older import style
+    import mediapipe as mp
 
 class VisionProcessor:
     def __init__(self):

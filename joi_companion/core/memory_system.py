@@ -10,6 +10,8 @@ import threading
 import time
 import base64
 import hashlib
+import ctypes
+from ctypes import wintypes
 from collections import Counter
 from pathlib import Path
 
@@ -35,6 +37,26 @@ class MemorySystem:
         self._conversation_cipher = None
         self._conversation_encryption_enabled = False
         self._conversation_encryption_error = ""
+        self._conversation_encryption_source = "disabled"
+        self._profile_secret_paths = (
+            ("phone_settings", "discord_webhook_url"),
+            ("phone_settings", "discord_bot_token"),
+            ("phone_settings", "twitch_oauth_token"),
+        )
+        self._profile_encrypted_string_fields = {
+            "personality_profile_text",
+        }
+        self._profile_encrypted_life_context_keys = {
+            "world_sovereign_skills_json",
+            "world_sovereign_resources_json",
+            "world_spacefaring_json",
+            "world_builder_state_json",
+            "sovereign_body_learning_traits_json",
+            "sovereign_creation_learning_traits_json",
+            "world_bug_protection_json",
+        }
+        self._in_self_repair = False
+        self._profile_read_repair_attempted = False
         self._configure_resilience_paths()
         self._configure_conversation_encryption()
         self._repair_corrupted_db_if_needed()
@@ -45,29 +67,64 @@ class MemorySystem:
         self._open_db()
         self.session_id = datetime.utcnow().isoformat()
         self.session_turn = 0
-        self._ensure_profile_schema()
+        try:
+            self._ensure_profile_schema()
+            self._sync_memory_architecture_profile()
+        except Exception as e:
+            print(f"[MemorySystem] Profile schema check failed at startup: {e}")
+            repair = self.self_repair()
+            if not repair.get("ok"):
+                raise
         self._import_legacy_chat_memory()
         self._run_resilience_maintenance(force=True, reason="startup")
 
     def _resolve_db_path(self, db_path):
         configured = str(os.getenv("AURION_MEMORY_DB_PATH", "")).strip()
-        default_d_drive = r"D:\AurionData\aurion_memory.json"
-        candidate = configured or str(db_path or default_d_drive)
-        if candidate.lower() == "aurion_memory.json":
-            candidate = default_d_drive
+        legacy_default = Path(r"D:\AurionData\aurion_memory.json")
+        default_primary = self._default_primary_memory_path()
+        raw_hint = str(db_path or "").strip()
+        use_default_primary = (
+            not configured and (
+                not raw_hint or
+                raw_hint.lower() == "aurion_memory.json" or
+                raw_hint == str(legacy_default)
+            )
+        )
+        candidate = configured or (str(default_primary) if use_default_primary else raw_hint or str(default_primary))
         path = Path(candidate)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+            if use_default_primary and not path.exists() and legacy_default.exists():
+                try:
+                    shutil.copy2(str(legacy_default), str(path))
+                except Exception as e:
+                    print(f"[MemorySystem] Could not migrate legacy primary memory DB to C drive: {e}")
             return str(path)
         except Exception:
             # Fall back to local repo path if D: path cannot be created.
             return str(Path(db_path or "aurion_memory.json"))
 
+    def _default_primary_memory_path(self):
+        if os.name == "nt":
+            local_app_data = str(os.getenv("LOCALAPPDATA", "")).strip()
+            if local_app_data:
+                return Path(local_app_data) / "Aurion" / "memory" / "aurion_memory.json"
+        return Path("aurion_memory.json")
+
+    def _default_memory_archive_root(self):
+        configured = str(os.getenv("AURION_MEMORY_ARCHIVE_ROOT", "")).strip()
+        if configured:
+            return Path(configured).expanduser()
+        if os.name == "nt":
+            return Path(r"D:\AurionData\MemoryArchive")
+        return self._default_primary_memory_path().parent / "archive"
+
     def _configure_resilience_paths(self):
         primary_path = Path(self.db_path)
-        default_secondary = primary_path.with_name(f"{primary_path.stem}_secondary{primary_path.suffix}")
+        archive_root = self._default_memory_archive_root()
+        default_secondary = archive_root / f"{primary_path.stem}_secondary{primary_path.suffix}"
         secondary_raw = str(os.getenv("AURION_MEMORY_SECONDARY_DB_PATH", str(default_secondary))).strip()
-        backup_default = primary_path.parent / "backups"
+        backup_default = archive_root / "backups"
         backup_raw = str(os.getenv("AURION_MEMORY_BACKUP_DIR", str(backup_default))).strip()
         self.secondary_sync_interval_seconds = max(
             0,
@@ -105,9 +162,12 @@ class MemorySystem:
     def _configure_conversation_encryption(self):
         key_raw = str(os.getenv("AURION_MEMORY_ENCRYPTION_KEY", "")).strip()
         if not key_raw:
+            key_raw = self._load_or_create_managed_encryption_key()
+        if not key_raw:
             self._conversation_encryption_enabled = False
             self._conversation_cipher = None
             self._conversation_encryption_error = ""
+            self._conversation_encryption_source = "disabled"
             return
         try:
             from cryptography.fernet import Fernet
@@ -115,6 +175,7 @@ class MemorySystem:
             self._conversation_encryption_enabled = False
             self._conversation_cipher = None
             self._conversation_encryption_error = f"cryptography_unavailable:{e}"
+            self._conversation_encryption_source = "unavailable"
             print(f"[MemorySystem] Conversation encryption disabled: {e}")
             return
         try:
@@ -128,11 +189,47 @@ class MemorySystem:
             self._conversation_cipher = Fernet(key_material)
             self._conversation_encryption_enabled = True
             self._conversation_encryption_error = ""
+            if str(os.getenv("AURION_MEMORY_ENCRYPTION_KEY", "")).strip():
+                self._conversation_encryption_source = "env"
+            elif self._conversation_encryption_source in {"managed-dpapi", "managed-dpapi-created"}:
+                pass
+            else:
+                self._conversation_encryption_source = "derived"
         except Exception as e:
             self._conversation_encryption_enabled = False
             self._conversation_cipher = None
             self._conversation_encryption_error = f"invalid_encryption_key:{e}"
+            self._conversation_encryption_source = "invalid"
             print(f"[MemorySystem] Conversation encryption key invalid: {e}")
+
+    def _managed_encryption_key_path(self):
+        configured = str(os.getenv("AURION_MEMORY_ENCRYPTION_KEY_FILE", "")).strip()
+        if configured:
+            return Path(configured).expanduser()
+        return Path(self.db_path).with_suffix(".key.dpapi")
+
+    def _load_or_create_managed_encryption_key(self):
+        if os.name != "nt":
+            return ""
+        key_path = self._managed_encryption_key_path()
+        try:
+            if key_path.exists():
+                protected = key_path.read_text(encoding="utf-8").strip()
+                plain = self._dpapi_decrypt_text(protected).strip()
+                if plain:
+                    self._conversation_encryption_source = "managed-dpapi"
+                    return plain
+            key_path.parent.mkdir(parents=True, exist_ok=True)
+            generated = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii")
+            protected = self._dpapi_encrypt_text(generated)
+            if not protected.startswith("dpapi::"):
+                return ""
+            key_path.write_text(protected, encoding="utf-8")
+            self._conversation_encryption_source = "managed-dpapi-created"
+            return generated
+        except Exception as e:
+            self._conversation_encryption_error = f"managed_key_failed:{e}"
+            return ""
 
     def _encrypt_conversation_text(self, value):
         text = str(value or "")
@@ -157,6 +254,149 @@ class MemorySystem:
         except Exception:
             return "[encrypted message unavailable: key mismatch]"
 
+    def _dpapi_encrypt_text(self, value):
+        text = str(value or "")
+        if not text or text.startswith("dpapi::") or os.name != "nt":
+            return text
+        try:
+            class DATA_BLOB(ctypes.Structure):
+                _fields_ = [
+                    ("cbData", wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_byte)),
+                ]
+
+            raw = text.encode("utf-8")
+            in_buffer = ctypes.create_string_buffer(raw, len(raw))
+            in_blob = DATA_BLOB(len(raw), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_byte)))
+            out_blob = DATA_BLOB()
+            crypt32 = ctypes.windll.crypt32
+            kernel32 = ctypes.windll.kernel32
+            if not crypt32.CryptProtectData(
+                ctypes.byref(in_blob),
+                "aurion-profile-secret",
+                None,
+                None,
+                None,
+                0,
+                ctypes.byref(out_blob),
+            ):
+                return text
+            try:
+                encrypted = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+            finally:
+                kernel32.LocalFree(out_blob.pbData)
+            return "dpapi::" + base64.b64encode(encrypted).decode("ascii")
+        except Exception:
+            return text
+
+    def _dpapi_decrypt_text(self, value):
+        text = str(value or "")
+        if not text.startswith("dpapi::") or os.name != "nt":
+            return text
+        token = text.split("dpapi::", 1)[1].strip()
+        if not token:
+            return ""
+        try:
+            class DATA_BLOB(ctypes.Structure):
+                _fields_ = [
+                    ("cbData", wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_byte)),
+                ]
+
+            raw = base64.b64decode(token.encode("ascii"), validate=False)
+            in_buffer = ctypes.create_string_buffer(raw, len(raw))
+            in_blob = DATA_BLOB(len(raw), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_byte)))
+            out_blob = DATA_BLOB()
+            crypt32 = ctypes.windll.crypt32
+            kernel32 = ctypes.windll.kernel32
+            if not crypt32.CryptUnprotectData(
+                ctypes.byref(in_blob),
+                None,
+                None,
+                None,
+                None,
+                0,
+                ctypes.byref(out_blob),
+            ):
+                return ""
+            try:
+                decrypted = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+            finally:
+                kernel32.LocalFree(out_blob.pbData)
+            return decrypted.decode("utf-8", errors="ignore")
+        except Exception:
+            return ""
+
+    def _profile_copy(self, profile):
+        if not isinstance(profile, dict):
+            return {}
+        try:
+            return json.loads(json.dumps(profile, ensure_ascii=False))
+        except Exception:
+            return dict(profile)
+
+    def _set_profile_secret_value(self, profile, path, value):
+        node = profile
+        for key in path[:-1]:
+            if not isinstance(node.get(key), dict):
+                node[key] = {}
+            node = node[key]
+        node[path[-1]] = value
+
+    def _get_profile_secret_value(self, profile, path):
+        node = profile
+        for key in path:
+            if not isinstance(node, dict):
+                return ""
+            node = node.get(key)
+        return str(node or "")
+
+    def _serialize_profile_for_store(self, profile):
+        out = self._encrypt_profile_payload(profile)
+        for path in self._profile_secret_paths:
+            current = self._get_profile_secret_value(out, path)
+            if not current:
+                continue
+            self._set_profile_secret_value(out, path, self._dpapi_encrypt_text(current))
+        return out
+
+    def _materialize_profile_for_runtime(self, profile):
+        out = self._profile_copy(profile)
+        for path in self._profile_secret_paths:
+            current = self._get_profile_secret_value(out, path)
+            if not current:
+                continue
+            self._set_profile_secret_value(out, path, self._dpapi_decrypt_text(current))
+        return self._decrypt_profile_payload(out)
+
+    def _encrypt_profile_payload(self, profile):
+        out = self._profile_copy(profile)
+        for field in self._profile_encrypted_string_fields:
+            current = str(out.get(field, "") or "")
+            if current:
+                out[field] = self._encrypt_conversation_text(current)
+        life_context = dict(out.get("life_context", {}) or {})
+        for key in self._profile_encrypted_life_context_keys:
+            current = str(life_context.get(key, "") or "")
+            if current:
+                life_context[key] = self._encrypt_conversation_text(current)
+        out["life_context"] = life_context
+        return out
+
+    def _decrypt_profile_payload(self, profile):
+        out = self._profile_copy(profile)
+        for field in self._profile_encrypted_string_fields:
+            current = str(out.get(field, "") or "")
+            if current:
+                out[field] = self._decrypt_conversation_text(current)
+        life_context = dict(out.get("life_context", {}) or {})
+        for key in self._profile_encrypted_life_context_keys:
+            current = str(life_context.get(key, "") or "")
+            if current:
+                life_context[key] = self._decrypt_conversation_text(current)
+        out["life_context"] = life_context
+        return out
+
     def _normalize_interaction(self, item):
         if not isinstance(item, dict):
             return {}
@@ -172,8 +412,25 @@ class MemorySystem:
         return interaction
 
     def _get_all_interactions(self):
-        with self._db_lock:
-            return [self._normalize_interaction(i) for i in self.conversations.all()]
+        try:
+            with self._db_lock:
+                interactions = [self._normalize_interaction(i) for i in self.conversations.all()]
+                self._interaction_read_repair_attempted = False
+                return interactions
+        except Exception as e:
+            if self._in_self_repair:
+                raise
+            if self._interaction_read_repair_attempted:
+                raise
+            self._interaction_read_repair_attempted = True
+            print(f"[MemorySystem] conversation read failed: {e}")
+            repair = self.self_repair()
+            if not repair.get("ok"):
+                raise
+            with self._db_lock:
+                interactions = [self._normalize_interaction(i) for i in self.conversations.all()]
+                self._interaction_read_repair_attempted = False
+                return interactions
 
     def _safe_copy_atomic(self, source_path, target_path):
         source = Path(source_path)
@@ -181,10 +438,25 @@ class MemorySystem:
         if not source.exists():
             return False
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f"{target.name}.tmp")
-        shutil.copy2(str(source), str(tmp))
-        os.replace(str(tmp), str(target))
-        return True
+        tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        last_error = None
+        for attempt in range(5):
+            try:
+                shutil.copy2(str(source), str(tmp))
+                os.replace(str(tmp), str(target))
+                return True
+            except PermissionError as e:
+                last_error = e
+                time.sleep(0.12 * (attempt + 1))
+            finally:
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except Exception:
+                    pass
+        if last_error:
+            raise last_error
+        return False
 
     def _enforce_backup_retention(self):
         if not self.backup_dir or self.max_backup_files <= 0:
@@ -255,7 +527,11 @@ class MemorySystem:
             "write_count": int(self._memory_write_count),
             "last_error": self._last_resilience_error or None,
             "conversation_encryption_enabled": bool(self._conversation_encryption_enabled),
-            "conversation_encryption_error": self._conversation_encryption_error or None
+            "conversation_encryption_error": self._conversation_encryption_error or None,
+            "conversation_encryption_source": self._conversation_encryption_source,
+            "profile_encrypted_fields": sorted(list(self._profile_encrypted_string_fields)),
+            "life_context_encrypted_keys": sorted(list(self._profile_encrypted_life_context_keys)),
+            "memory_architecture": self._build_memory_architecture_state()
         }
 
     def _open_db(self):
@@ -264,6 +540,7 @@ class MemorySystem:
         self.user_profile = self.db.table('user_profile')
         self.topics = self.db.table('topics')
         self.rag_documents = self.db.table('rag_documents')
+        self._interaction_read_repair_attempted = False
 
     def _repair_corrupted_db_if_needed(self):
         """Repair TinyDB JSON when interrupted writes leave trailing junk."""
@@ -349,25 +626,42 @@ class MemorySystem:
             "ok": False,
             "error": None
         }
+        self._in_self_repair = True
         try:
-            _ = len(self.conversations)
-            _ = self.user_profile.all()
-            result["ok"] = True
-            return result
-        except Exception as e:
-            result["error"] = str(e)
-            print(f"[MemorySystem] Read failed, attempting repair: {e}")
+            try:
+                _ = len(self.conversations)
+                _ = self.user_profile.all()
+                result["ok"] = True
+                return result
+            except Exception as e:
+                result["error"] = str(e)
+                print(f"[MemorySystem] Read failed, attempting repair: {e}")
 
-        try:
-            if self.db:
-                self.db.close()
-        except Exception:
-            pass
+            try:
+                if self.db:
+                    self.db.close()
+            except Exception:
+                pass
 
-        self._repair_corrupted_db_if_needed()
+            self._repair_corrupted_db_if_needed()
 
-        try:
-            self._open_db()
+            try:
+                self._open_db()
+                _ = len(self.conversations)
+                _ = self.user_profile.all()
+            except Exception:
+                # Final fallback: force-reset unreadable DB to a valid empty JSON object.
+                try:
+                    path = Path(self.db_path)
+                    if path.exists():
+                        raw = path.read_text(encoding='utf-8')
+                        backup = path.with_name(f"{path.name}.bak.{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.hardreset")
+                        backup.write_text(raw, encoding='utf-8')
+                    path.write_text("{}", encoding='utf-8')
+                except Exception:
+                    pass
+                self._open_db()
+
             self._ensure_profile_schema()
             _ = len(self.conversations)
             _ = self.user_profile.all()
@@ -378,6 +672,8 @@ class MemorySystem:
         except Exception as e:
             result["error"] = str(e)
             print(f"[MemorySystem] Repair failed: {e}")
+        finally:
+            self._in_self_repair = False
 
         return result
 
@@ -418,7 +714,10 @@ class MemorySystem:
             'preferences': [],
             'accomplishments': [],
             'personal_details': [],
+            'autonomy_directives': [],
+            'important_facts': [],
             'life_context': {},
+            'memory_architecture': {},
             'voice_patterns': {
                 'message_count': 0,
                 'avg_words_per_message': 0.0,
@@ -445,6 +744,56 @@ class MemorySystem:
                 self._save_profile(profile)
         else:
             self._save_profile(self._default_profile())
+
+    def _build_memory_architecture_state(self):
+        primary = Path(self.db_path)
+        secondary = Path(self.secondary_db_path) if self.secondary_db_path else None
+        backup_root = Path(self.backup_dir) if self.backup_dir else None
+        primary_drive = str(primary.drive or "").upper()
+        secondary_drive = str(secondary.drive or "").upper() if secondary else ""
+        backup_drive = str(backup_root.drive or "").upper() if backup_root else ""
+        return {
+            "policy": "Keep Aurion's active processing and persistent working memory on C for speed, while storing long-term memory mirrors and backups on D for capacity.",
+            "active_runtime_role": "primary live memory",
+            "active_runtime_path": str(primary),
+            "active_runtime_drive": primary_drive,
+            "active_runtime_prefers_fast_local_storage": True,
+            "long_term_role": "secondary long-term memory mirror",
+            "long_term_path": str(secondary) if secondary else "",
+            "long_term_drive": secondary_drive,
+            "backup_role": "archival memory snapshots",
+            "backup_dir": str(backup_root) if backup_root else "",
+            "backup_drive": backup_drive,
+            "active_memory_on_c": primary_drive.startswith("C:"),
+            "long_term_memory_on_d": secondary_drive.startswith("D:") or backup_drive.startswith("D:"),
+            "updated_at": datetime.utcnow().isoformat()
+        }
+
+    def _sync_memory_architecture_profile(self):
+        profile = self.get_profile()
+        if not profile:
+            return
+        desired = self._build_memory_architecture_state()
+        current = dict(profile.get("memory_architecture", {}) or {})
+        changed = current != desired
+        life_context = dict(profile.get("life_context", {}) or {})
+        summary = "Active memory lives on C for fast recall and processing; long-term memory mirrors and backups live on D for larger archival continuity."
+        desired_life_context = {
+            "memory_storage_policy": summary,
+            "active_memory_path": desired.get("active_runtime_path", ""),
+            "long_term_memory_path": desired.get("long_term_path", ""),
+            "backup_memory_dir": desired.get("backup_dir", "")
+        }
+        for key, value in desired_life_context.items():
+            if str(life_context.get(key, "")) != str(value):
+                life_context[key] = value
+                changed = True
+        if not changed:
+            return
+        profile["memory_architecture"] = desired
+        profile["life_context"] = life_context
+        profile["updated_at"] = datetime.utcnow().isoformat()
+        self._save_profile(profile)
 
     def _memory_file_signature(self, path_obj):
         try:
@@ -559,15 +908,53 @@ class MemorySystem:
             print(f"[MemorySystem] Legacy memory import failed: {e}")
 
     def get_profile(self):
-        with self._db_lock:
-            profiles = self.user_profile.all()
-            return profiles[0] if profiles else None
+        try:
+            with self._db_lock:
+                profiles = self.user_profile.all()
+                if not profiles:
+                    self._profile_read_repair_attempted = False
+                    return None
+                self._profile_read_repair_attempted = False
+                return self._materialize_profile_for_runtime(profiles[0])
+        except Exception as e:
+            if self._in_self_repair:
+                raise
+            if self._profile_read_repair_attempted:
+                raise
+            self._profile_read_repair_attempted = True
+            print(f"[MemorySystem] get_profile read failed: {e}")
+            repair = self.self_repair()
+            if not repair.get("ok"):
+                raise
+            with self._db_lock:
+                profiles = self.user_profile.all()
+                if not profiles:
+                    self._profile_read_repair_attempted = False
+                    return None
+                self._profile_read_repair_attempted = False
+                return self._materialize_profile_for_runtime(profiles[0])
 
     def _save_profile(self, profile):
-        with self._db_lock:
-            self.user_profile.truncate()
-            self.user_profile.insert(profile)
-            self._mark_memory_written(reason="profile_save")
+        try:
+            with self._db_lock:
+                self.user_profile.truncate()
+                self.user_profile.insert(self._serialize_profile_for_store(profile))
+                self._mark_memory_written(reason="profile_save")
+                self._profile_read_repair_attempted = False
+                self._interaction_read_repair_attempted = False
+        except Exception as e:
+            if self._in_self_repair:
+                raise
+            print(f"[MemorySystem] _save_profile write failed: {e}")
+            repair = self.self_repair()
+            if not repair.get("ok"):
+                raise
+            with self._db_lock:
+                self.user_profile.truncate()
+                self.user_profile.insert(self._serialize_profile_for_store(profile))
+                self._mark_memory_written(reason="profile_save")
+                self._profile_read_repair_attempted = False
+                self._interaction_read_repair_attempted = False
 
     def _append_unique(self, items, value, max_items=None):
         normalized = str(value).strip()
@@ -580,6 +967,121 @@ class MemorySystem:
         if len(items) > limit:
             items = items[-limit:]
         return items
+
+    def _normalize_directive_key(self, value):
+        text = self._strip_invalid_unicode(value).strip().lower()
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"[^a-z0-9\s]", "", text)
+        return text
+
+    def _priority_rank(self, value):
+        order = {"critical": 3, "high": 2, "normal": 1}
+        return order.get(str(value or "normal").strip().lower(), 1)
+
+    def _normalize_fact_key(self, value):
+        text = self._strip_invalid_unicode(value).strip().lower()
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"[^a-z0-9\s]", "", text)
+        return text
+
+    def _remember_important_fact(self, profile, fact, source="conversation", priority="high", memory_link=""):
+        text = self._strip_invalid_unicode(fact).strip()
+        if not text:
+            return False
+        normalized = self._normalize_fact_key(text)
+        if not normalized:
+            return False
+        items = list(profile.get("important_facts", []) or [])
+        now = datetime.utcnow().isoformat()
+        changed = False
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if self._normalize_fact_key(item.get("fact", "")) != normalized:
+                continue
+            item["fact"] = text
+            item["source"] = str(source or item.get("source") or "conversation").strip() or "conversation"
+            item["priority"] = (
+                priority
+                if self._priority_rank(priority) >= self._priority_rank(item.get("priority"))
+                else str(item.get("priority") or "normal")
+            )
+            item["memory_link"] = str(memory_link or item.get("memory_link") or "").strip()
+            item["times_seen"] = int(item.get("times_seen", 0) or 0) + 1
+            item["last_seen_at"] = now
+            changed = True
+            break
+        else:
+            items.append({
+                "fact": text,
+                "source": str(source or "conversation").strip() or "conversation",
+                "priority": str(priority or "normal").strip().lower() or "normal",
+                "memory_link": str(memory_link or "").strip(),
+                "times_seen": 1,
+                "first_seen_at": now,
+                "last_seen_at": now,
+            })
+            changed = True
+        if changed:
+            items.sort(
+                key=lambda item: (
+                    self._priority_rank(item.get("priority")),
+                    int(item.get("times_seen", 0) or 0),
+                    str(item.get("last_seen_at", "")),
+                ),
+                reverse=True
+            )
+            profile["important_facts"] = items[: min(self.max_profile_list_items, 240)]
+        return changed
+
+    def _remember_autonomy_directive(self, profile, directive, source="user_instruction", priority="high"):
+        text = self._strip_invalid_unicode(directive).strip()
+        if not text:
+            return False
+        items = list(profile.get("autonomy_directives", []) or [])
+        now = datetime.utcnow().isoformat()
+        normalized = self._normalize_directive_key(text)
+        if not normalized:
+            return False
+        changed = False
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            existing_key = self._normalize_directive_key(item.get("directive", ""))
+            if existing_key != normalized:
+                continue
+            item["directive"] = text
+            item["source"] = str(source or item.get("source") or "user_instruction").strip() or "user_instruction"
+            item["priority"] = (
+                priority
+                if self._priority_rank(priority) >= self._priority_rank(item.get("priority"))
+                else str(item.get("priority") or "normal")
+            )
+            item["times_seen"] = int(item.get("times_seen", 0) or 0) + 1
+            item["last_seen_at"] = now
+            changed = True
+            break
+        else:
+            items.append({
+                "directive": text,
+                "source": str(source or "user_instruction").strip() or "user_instruction",
+                "priority": str(priority or "normal").strip().lower() or "normal",
+                "times_seen": 1,
+                "first_seen_at": now,
+                "last_seen_at": now
+            })
+            changed = True
+        if changed:
+            items.sort(
+                key=lambda item: (
+                    self._priority_rank(item.get("priority")),
+                    int(item.get("times_seen", 0) or 0),
+                    str(item.get("last_seen_at", ""))
+                ),
+                reverse=True
+            )
+            profile["autonomy_directives"] = items[: min(self.max_profile_list_items, 200)]
+        return changed
 
     def _strip_invalid_unicode(self, value):
         text = str(value or "")
@@ -633,6 +1135,8 @@ class MemorySystem:
             self.track_emotion(user_emotion)
             self.extract_topics(user_input)
             self.extract_personal_details(user_input)
+            self.extract_autonomy_directives(user_input)
+            self.extract_important_facts(user_input)
             self.update_voice_patterns(user_input)
 
             profile = self.get_profile()
@@ -696,6 +1200,10 @@ class MemorySystem:
                 'lexicon_adaptation'
             ):
                 profile[category] = self._strip_invalid_unicode(value).strip().lower()
+            elif category == 'autonomy_directives':
+                self._remember_autonomy_directive(profile, value, source="manual_profile_update", priority="high")
+            elif category == 'important_facts':
+                self._remember_important_fact(profile, value, source="manual_profile_update", priority="high")
             elif category in ('preferences', 'accomplishments', 'personal_details'):
                 profile[category] = self._append_unique(
                     profile.get(category, []),
@@ -822,6 +1330,76 @@ class MemorySystem:
         profile['updated_at'] = datetime.utcnow().isoformat()
         self._save_profile(profile)
 
+    def extract_autonomy_directives(self, text):
+        """Capture durable user instructions and stable relationship rules as active memory."""
+        stripped = self._strip_invalid_unicode(text).strip()
+        if not stripped:
+            return
+        profile = self.get_profile()
+        if not profile:
+            return
+
+        sentences = [seg.strip(" \t-•") for seg in re.split(r"[\r\n]+|(?<=[.!?])\s+", stripped) if seg.strip()]
+        changed = False
+        for sentence in sentences:
+            lower = sentence.lower()
+            if sentence.endswith("?") or len(sentence) < 12 or len(sentence) > 260:
+                continue
+            if not re.search(r"\b(remember|make sure|keep|always|never|don't|do not|should|must|need to)\b", lower):
+                continue
+            if not re.search(r"\b(aurion|you|your|memory|autonomy|processing|backup|backups|persistent|long[- ]term|c drive|d drive|c:|d:)\b", lower):
+                continue
+            priority = "normal"
+            if re.search(r"\b(always|never|must|make sure|do not|don't)\b", lower):
+                priority = "high"
+            if re.search(r"\bcritical|absolutely|non[- ]negotiable\b", lower):
+                priority = "critical"
+            changed = self._remember_autonomy_directive(
+                profile,
+                sentence,
+                source="conversation_directive",
+                priority=priority
+            ) or changed
+        if changed:
+            profile['updated_at'] = datetime.utcnow().isoformat()
+            self._save_profile(profile)
+
+    def extract_important_facts(self, text):
+        stripped = self._strip_invalid_unicode(text).strip()
+        if not stripped or stripped.endswith("?"):
+            return
+        profile = self.get_profile()
+        if not profile:
+            return
+        lower = stripped.lower()
+        if len(stripped) < 18 or len(stripped) > 280:
+            return
+        significance_patterns = [
+            r"\bremember\b",
+            r"\bimportant\b",
+            r"\bnever forget\b",
+            r"\bi (?:am|have|live|work|love|need|prefer|always|never)\b",
+            r"\bmy (?:name|birthday|favorite|job|home|goal|project|partner|dog|cat|family)\b",
+            r"\bwe (?:met|started|built|decided|agreed)\b",
+        ]
+        if not any(re.search(pattern, lower) for pattern in significance_patterns):
+            return
+        priority = "normal"
+        if re.search(r"\b(important|remember|always|never|need|fundamental|core)\b", lower):
+            priority = "high"
+        if re.search(r"\b(never forget|most important|critical|permanent)\b", lower):
+            priority = "critical"
+        changed = self._remember_important_fact(
+            profile,
+            stripped,
+            source="conversation_fact",
+            priority=priority,
+            memory_link=f"conversation::{self.session_id}::{self.session_turn + 1}"
+        )
+        if changed:
+            profile['updated_at'] = datetime.utcnow().isoformat()
+            self._save_profile(profile)
+
     def update_voice_patterns(self, text):
         """Track lightweight writing/voice-style patterns from user messages."""
         profile = self.get_profile()
@@ -905,6 +1483,20 @@ class MemorySystem:
         if preferences:
             lines.append("Preferences: " + "; ".join(preferences[-10:]))
 
+        directives = list(profile.get('autonomy_directives', []) or [])
+        if directives:
+            directive_bits = []
+            for item in directives[:8]:
+                if not isinstance(item, dict):
+                    continue
+                directive = str(item.get("directive", "")).strip()
+                if not directive:
+                    continue
+                priority = str(item.get("priority", "normal")).strip()
+                directive_bits.append(f"[{priority}] {directive}")
+            if directive_bits:
+                lines.append("Active directives: " + " | ".join(directive_bits))
+
         accomplishments = profile.get('accomplishments', [])
         if accomplishments:
             lines.append("Accomplishments: " + "; ".join(accomplishments[-10:]))
@@ -936,6 +1528,43 @@ class MemorySystem:
         """Get most recent interactions."""
         all_interactions = self._get_all_interactions()
         return all_interactions[-count:] if all_interactions else []
+
+    def delete_recent_interactions(self, count=1, session_only=False):
+        """Delete the most recent interactions globally or for the current session."""
+        limit = max(0, int(count or 0))
+        if limit <= 0:
+            return 0
+        with self._db_lock:
+            rows = list(self.conversations.all())
+            if not rows:
+                return 0
+            indexed_matches = []
+            for index, row in enumerate(rows):
+                if session_only and row.get('session_id') != self.session_id:
+                    continue
+                indexed_matches.append((index, row))
+            if not indexed_matches:
+                return 0
+            indexed_matches.sort(key=lambda item: (
+                str(item[1].get('timestamp', '') or ''),
+                int(item[1].get('session_turn', 0) or 0),
+                item[0]
+            ))
+            remove_indexes = {item[0] for item in indexed_matches[-limit:]}
+            kept_rows = [row for index, row in enumerate(rows) if index not in remove_indexes]
+            self.conversations.truncate()
+            for row in kept_rows:
+                self.conversations.insert(row)
+            self._mark_memory_written(reason="delete_recent_interactions")
+            return len(remove_indexes)
+
+    def clear_all_interactions(self):
+        """Delete all persisted interactions."""
+        with self._db_lock:
+            total = len(self.conversations)
+            self.conversations.truncate()
+            self._mark_memory_written(reason="clear_all_interactions")
+            return total
 
     def get_recent_aurion_responses(self, count=8):
         """Get recent Aurion replies for repetition-avoidance."""
@@ -1204,6 +1833,40 @@ class MemorySystem:
                             "score": score,
                             "timestamp": str(profile.get("updated_at", ""))
                         })
+            for item in list(profile.get("autonomy_directives", []) or []):
+                if not isinstance(item, dict):
+                    continue
+                directive = str(item.get("directive", "")).strip()
+                if not directive:
+                    continue
+                priority = str(item.get("priority", "normal")).strip() or "normal"
+                content = f"Autonomy directive ({priority}): {directive}"
+                score = self._score_overlap(query_tokens, self._tokenize_for_rag(content))
+                if score > 0.01:
+                    candidates.append({
+                        "source": "profile_autonomy_directives",
+                        "content": content,
+                        "score": score + (0.08 if priority == "critical" else 0.04 if priority == "high" else 0.0),
+                        "timestamp": str(item.get("last_seen_at") or profile.get("updated_at", ""))
+                    })
+
+            for item in list(profile.get("important_facts", []) or []):
+                if not isinstance(item, dict):
+                    continue
+                fact = str(item.get("fact", "")).strip()
+                if not fact:
+                    continue
+                memory_link = str(item.get("memory_link", "")).strip()
+                content = f"Important fact: {fact}" + (f" | memory link: {memory_link}" if memory_link else "")
+                score = self._score_overlap(query_tokens, self._tokenize_for_rag(content))
+                if score > 0.01:
+                    priority = str(item.get("priority", "normal")).strip().lower() or "normal"
+                    candidates.append({
+                        "source": "profile_important_facts",
+                        "content": content,
+                        "score": score + (0.14 if priority == "critical" else 0.09 if priority == "high" else 0.04),
+                        "timestamp": str(item.get("last_seen_at") or profile.get("updated_at", ""))
+                    })
 
             candidates.sort(key=lambda row: (row["score"], row["timestamp"]), reverse=True)
             return candidates[:max(1, int(limit))]
@@ -1229,6 +1892,106 @@ class MemorySystem:
         if not lines:
             return ""
         return "Retrieved context (RAG):\n" + "\n".join(lines)
+
+    def build_memory_access_context(self, query="", max_chars=6000, rag_limit=16, transcript_chars=1400, include_session=True):
+        blocks = []
+        total = 0
+
+        def _append_block(text):
+            nonlocal total
+            block = str(text or "").strip()
+            if not block:
+                return
+            if total + len(block) + 2 > max_chars:
+                remaining = max_chars - total - 2
+                if remaining <= 120:
+                    return
+                block = block[:remaining].rsplit(" ", 1)[0].rstrip(" ,;:.") + "..."
+            blocks.append(block)
+            total += len(block) + 2
+
+        rag_context = self.build_rag_context(query, max_chars=min(max_chars, max(1200, int(max_chars * 0.45))), limit=rag_limit)
+        _append_block(rag_context)
+
+        try:
+            profile = self.get_profile() or {}
+        except Exception:
+            profile = {}
+        if profile:
+            life_context = dict(profile.get("life_context", {}) or {})
+            life_lines = []
+            for key, value in list(life_context.items())[:24]:
+                key_text = str(key).strip()
+                value_text = str(value).strip()
+                if not key_text or not value_text:
+                    continue
+                life_lines.append(f"- {key_text}: {value_text[:240]}")
+            if life_lines:
+                _append_block("Profile life context:\n" + "\n".join(life_lines))
+
+            directive_lines = []
+            for item in list(profile.get("autonomy_directives", []) or [])[:10]:
+                if not isinstance(item, dict):
+                    continue
+                directive = str(item.get("directive", "")).strip()
+                if not directive:
+                    continue
+                priority = str(item.get("priority", "normal")).strip() or "normal"
+                directive_lines.append(f"- ({priority}) {directive[:260]}")
+            if directive_lines:
+                _append_block("Autonomy directives:\n" + "\n".join(directive_lines))
+
+            fact_lines = []
+            for item in list(profile.get("important_facts", []) or [])[:14]:
+                if not isinstance(item, dict):
+                    continue
+                fact = str(item.get("fact", "")).strip()
+                if not fact:
+                    continue
+                priority = str(item.get("priority", "normal")).strip() or "normal"
+                memory_link = str(item.get("memory_link", "")).strip()
+                suffix = f" -> {memory_link[:120]}" if memory_link else ""
+                fact_lines.append(f"- ({priority}) {fact[:240]}{suffix}")
+            if fact_lines:
+                _append_block("Important facts folder:\n" + "\n".join(fact_lines))
+
+        if include_session:
+            try:
+                session_transcript = self.build_session_transcript(max_chars=transcript_chars)
+            except Exception:
+                session_transcript = ""
+            if session_transcript:
+                _append_block("Current session transcript:\n" + session_transcript)
+
+        try:
+            highlights = self.get_imported_chat_highlights(limit=4)
+        except Exception:
+            highlights = []
+        if highlights:
+            highlight_lines = []
+            for item in highlights:
+                user_text = str(item.get("user_input", "") or "").strip()
+                aurion_text = str(item.get("aurion_response", "") or "").strip()
+                if not user_text and not aurion_text:
+                    continue
+                highlight_lines.append(f"- U: {user_text[:140]} | A: {aurion_text[:180]}")
+            if highlight_lines:
+                _append_block("Imported highlights:\n" + "\n".join(highlight_lines))
+
+        try:
+            resilience = self.get_memory_resilience_status()
+        except Exception:
+            resilience = {}
+        if resilience:
+            _append_block(
+                "Memory resilience:\n"
+                f"- Primary live memory: {str(resilience.get('primary_path', '')).strip()}\n"
+                f"- Secondary mirror: {str(resilience.get('secondary_path', '')).strip()}\n"
+                f"- Last backup: {str(resilience.get('last_backup_at', '') or 'unknown')}\n"
+                f"- Encryption: {'on' if resilience.get('conversation_encryption_enabled') else 'off'}"
+            )
+
+        return "\n\n".join(blocks).strip()
 
     def get_interaction_count(self):
         """Get total number of interactions."""
@@ -1297,6 +2060,71 @@ class MemorySystem:
             for item in list(incoming.get(field, []) or []):
                 base = self._append_unique(base, item, max_items=self.max_profile_list_items)
             merged[field] = base
+
+        merged_directives = list(merged.get("autonomy_directives", []) or [])
+        for item in list(incoming.get("autonomy_directives", []) or []):
+            if not isinstance(item, dict):
+                continue
+            directive = str(item.get("directive", "")).strip()
+            if not directive:
+                continue
+            temp_profile = {"autonomy_directives": merged_directives}
+            self._remember_autonomy_directive(
+                temp_profile,
+                directive,
+                source=item.get("source", "sync_merge"),
+                priority=item.get("priority", "normal")
+            )
+            merged_directives = list(temp_profile.get("autonomy_directives", []) or [])
+            normalized = self._normalize_directive_key(directive)
+            for merged_item in merged_directives:
+                if self._normalize_directive_key(merged_item.get("directive", "")) != normalized:
+                    continue
+                try:
+                    merged_item["times_seen"] = max(
+                        int(merged_item.get("times_seen", 0) or 0),
+                        int(item.get("times_seen", 0) or 0)
+                    )
+                except Exception:
+                    pass
+                incoming_last_seen = str(item.get("last_seen_at", "") or "").strip()
+                if incoming_last_seen and incoming_last_seen > str(merged_item.get("last_seen_at", "") or ""):
+                    merged_item["last_seen_at"] = incoming_last_seen
+                break
+        merged["autonomy_directives"] = merged_directives
+
+        merged_facts = list(merged.get("important_facts", []) or [])
+        for item in list(incoming.get("important_facts", []) or []):
+            if not isinstance(item, dict):
+                continue
+            fact = str(item.get("fact", "")).strip()
+            if not fact:
+                continue
+            temp_profile = {"important_facts": merged_facts}
+            self._remember_important_fact(
+                temp_profile,
+                fact,
+                source=item.get("source", "sync_merge"),
+                priority=item.get("priority", "normal"),
+                memory_link=item.get("memory_link", "")
+            )
+            merged_facts = list(temp_profile.get("important_facts", []) or [])
+            normalized = self._normalize_fact_key(fact)
+            for merged_item in merged_facts:
+                if self._normalize_fact_key(merged_item.get("fact", "")) != normalized:
+                    continue
+                try:
+                    merged_item["times_seen"] = max(
+                        int(merged_item.get("times_seen", 0) or 0),
+                        int(item.get("times_seen", 0) or 0)
+                    )
+                except Exception:
+                    pass
+                incoming_last_seen = str(item.get("last_seen_at", "") or "").strip()
+                if incoming_last_seen and incoming_last_seen > str(merged_item.get("last_seen_at", "") or ""):
+                    merged_item["last_seen_at"] = incoming_last_seen
+                break
+        merged["important_facts"] = merged_facts
 
         merged_life = dict(merged.get("life_context", {}) or {})
         incoming_life = dict(incoming.get("life_context", {}) or {})

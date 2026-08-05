@@ -13,9 +13,16 @@ class UIManager:
         font_dir = Path(__file__).parent.parent / "data" / "assets" / "fonts"
         
         self.font_path = str(font_dir / "Orbitron-VariableFont_wght.ttf")
-        self.font_large = pygame.font.Font(self.font_path, 36)
-        self.font_medium = pygame.font.Font(self.font_path, 28)
-        self.font_small = pygame.font.Font(self.font_path, 20)
+        # Try custom font, fall back to system font if not found
+        try:
+            self.font_large = pygame.font.Font(self.font_path, 36)
+            self.font_medium = pygame.font.Font(self.font_path, 28)
+            self.font_small = pygame.font.Font(self.font_path, 20)
+        except FileNotFoundError:
+            # Use system font as fallback
+            self.font_large = pygame.font.SysFont("monospace", 36)
+            self.font_medium = pygame.font.SysFont("monospace", 28)
+            self.font_small = pygame.font.SysFont("monospace", 20)
 
         self.colors = {
             "cyan": (0, 255, 255),
