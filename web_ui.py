@@ -4582,6 +4582,36 @@ def _persist_world_builder_to_profile():
         print(f"[World Builder Persistence Warning] {e}")
 
 
+def _update_world_continuity(**fields):
+    """Thread-safe merge-update of app_state['world_continuity'] top-level fields.
+
+    Mirrors _update_code_autonomy_runtime: use this when the new values are
+    independent top-level fields. For nested substructures (most call sites
+    in this file set e.g. wc["guardian_presence"] = ...) or values that
+    depend on the current state, use _mutate_world_continuity instead.
+    """
+    with _APP_STATE_LOCK:
+        wc = dict(app_state.get("world_continuity") or {})
+        wc.update(fields)
+        app_state["world_continuity"] = wc
+        return wc
+
+def _mutate_world_continuity(mutate_fn):
+    """Thread-safe read-mutate-write of app_state['world_continuity'].
+
+    mutate_fn receives the current dict and mutates it in place while
+    _APP_STATE_LOCK is held, so the read and the write happen as one atomic
+    step -- this also means the write only reflects the fields mutate_fn
+    actually touches, re-merged against whatever is in app_state at write
+    time, instead of clobbering concurrent changes to other keys with a
+    stale snapshot captured earlier in the caller.
+    """
+    with _APP_STATE_LOCK:
+        wc = dict(app_state.get("world_continuity") or {})
+        mutate_fn(wc)
+        app_state["world_continuity"] = wc
+        return wc
+
 def _load_world_builder_from_profile():
     try:
         profile = _safe_get_profile()
@@ -4589,22 +4619,45 @@ def _load_world_builder_from_profile():
         stored = _safe_json_loads(life.get("world_builder_state_json", "{}"), {})
         if not isinstance(stored, dict) or not stored:
             return
-        wc = dict(app_state.get("world_continuity") or {})
-        wc["world_builder"] = stored
-        app_state["world_continuity"] = wc
+        def _apply(wc):
+            wc["world_builder"] = stored
+        _mutate_world_continuity(_apply)
         _resolve_world_builder_state()
     except Exception as e:
         print(f"[World Builder Load Warning] {e}")
 
 
 def _save_world_builder_state(state):
-    wc = dict(app_state.get("world_continuity") or {})
-    wc["world_builder"] = state
-    wc["synced_at"] = datetime.utcnow().isoformat()
-    app_state["world_continuity"] = wc
+    def _apply(wc):
+        wc["world_builder"] = state
+        wc["synced_at"] = datetime.utcnow().isoformat()
+    _mutate_world_continuity(_apply)
     _persist_world_builder_to_profile()
     return _resolve_world_builder_state()
 
+
+def _default_world_continuity_state():
+    """Baseline defaults for app_state['world_continuity'] sub-structures.
+
+    NOTE: this function was referenced (in _resolve_guardian_presence_state
+    below) but never defined anywhere in the file, so calling that function
+    always raised NameError in production -- caught by
+    tests/code_program while migrating world_continuity to the locked
+    helper pattern. Currently only covers guardian_presence, which is the
+    only caller today; extend as more world_continuity sub-keys adopt the
+    same default-factory convention used elsewhere (_default_world_builder_state,
+    _default_world_engine_state, etc.).
+    """
+    return {
+        "guardian_presence": {
+            "summons_enabled": True,
+            "active_guardians": [],
+            "last_summoned_guardian_id": "",
+            "last_summoned_layer_id": "",
+            "last_summoned_to": "",
+            "last_updated_at": None,
+        }
+    }
 
 def _resolve_guardian_presence_state():
     wc = dict(app_state.get("world_continuity") or {})
@@ -4637,8 +4690,9 @@ def _resolve_guardian_presence_state():
     state["last_summoned_layer_id"] = str(state.get("last_summoned_layer_id", "") or "")[:80]
     state["last_summoned_to"] = str(state.get("last_summoned_to", "") or "")[:120]
     state["last_updated_at"] = str(state.get("last_updated_at", "") or "")[:80] or None
-    wc["guardian_presence"] = state
-    app_state["world_continuity"] = wc
+    def _apply(wc_inner):
+        wc_inner["guardian_presence"] = state
+    _mutate_world_continuity(_apply)
     return state
 
 
@@ -4777,17 +4831,17 @@ def _grant_special_ability(entity_id, entity_name, entity_type, ability_name, de
         "note": "Ability granted by Billy and available for autonomous use."
     }]
     registry["last_updated_at"] = now_iso
-    wc = dict(app_state.get("world_continuity") or {})
-    wc["special_ability_registry"] = registry
-    wc["saved_activity"] = {
-        "activity": f"granted {final_name}",
-        "location": bucket["entity_name"],
-        "source": "special_ability_registry",
-        "details": f"{bucket['entity_name']} can now use {final_name} autonomously when appropriate.",
-        "savedAt": now_iso,
-    }
-    wc["synced_at"] = now_iso
-    app_state["world_continuity"] = wc
+    def _apply(wc):
+        wc["special_ability_registry"] = registry
+        wc["saved_activity"] = {
+            "activity": f"granted {final_name}",
+            "location": bucket["entity_name"],
+            "source": "special_ability_registry",
+            "details": f"{bucket['entity_name']} can now use {final_name} autonomously when appropriate.",
+            "savedAt": now_iso,
+        }
+        wc["synced_at"] = now_iso
+    _mutate_world_continuity(_apply)
     _persist_special_ability_registry_to_profile()
     return {"special_ability_registry": registry, "entity": bucket, "ability": ability}
 
@@ -4832,17 +4886,17 @@ def _revoke_special_ability(entity_id, entity_type, ability_name=None, ability_i
         "note": f"Ability removed by {str(actor_name or 'Billy')[:80]}."
     }]
     registry["last_updated_at"] = now_iso
-    wc = dict(app_state.get("world_continuity") or {})
-    wc["special_ability_registry"] = registry
-    wc["saved_activity"] = {
-        "activity": f"revoked {str(removed.get('name', removed.get('id', 'ability')) or 'ability')[:120]}",
-        "location": str(bucket.get("entity_name", clean_entity_id) or clean_entity_id)[:120],
-        "source": "special_ability_registry",
-        "details": f"{str(bucket.get('entity_name', clean_entity_id) or clean_entity_id)[:120]} no longer carries that bestowed ability.",
-        "savedAt": now_iso,
-    }
-    wc["synced_at"] = now_iso
-    app_state["world_continuity"] = wc
+    def _apply(wc):
+        wc["special_ability_registry"] = registry
+        wc["saved_activity"] = {
+            "activity": f"revoked {str(removed.get('name', removed.get('id', 'ability')) or 'ability')[:120]}",
+            "location": str(bucket.get("entity_name", clean_entity_id) or clean_entity_id)[:120],
+            "source": "special_ability_registry",
+            "details": f"{str(bucket.get('entity_name', clean_entity_id) or clean_entity_id)[:120]} no longer carries that bestowed ability.",
+            "savedAt": now_iso,
+        }
+        wc["synced_at"] = now_iso
+    _mutate_world_continuity(_apply)
     _persist_special_ability_registry_to_profile()
     return {"special_ability_registry": registry, "entity": bucket, "removed_ability": removed}
 

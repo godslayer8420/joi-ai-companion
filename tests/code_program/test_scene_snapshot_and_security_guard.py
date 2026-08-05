@@ -159,3 +159,59 @@ def test_update_code_autonomy_runtime_merges_without_clobbering():
     assert result["existing_field"] == "keep-me"
     assert result["last_tick_at"] == "2026-01-01T00:00:00"
     assert web_ui.app_state["code_autonomy_runtime"] == result
+
+
+# ---------------------------------------------------------------------------
+# world_continuity locking (first reviewed batch: world_builder + guardian
+# presence + special-ability grant/revoke). See ARCHITECTURE.md / session
+# todos for the remaining ~28 sites still tracked as follow-up.
+# ---------------------------------------------------------------------------
+
+def test_update_world_continuity_merges_without_clobbering():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["world_continuity"] = {"unrelated_field": "keep-me"}
+    result = web_ui._update_world_continuity(some_field="value")
+    assert result["unrelated_field"] == "keep-me"
+    assert result["some_field"] == "value"
+    assert web_ui.app_state["world_continuity"] == result
+
+
+def test_mutate_world_continuity_preserves_concurrent_top_level_keys():
+    # Simulate the exact hazard the helper fixes: caller A takes a stale
+    # snapshot, caller B updates an unrelated key in between, caller A's
+    # mutate_fn should still only touch its own key.
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["world_continuity"] = {"other_key": "from-someone-else"}
+
+    def _apply(wc):
+        wc["my_key"] = "mine"
+
+    result = web_ui._mutate_world_continuity(_apply)
+    assert result["my_key"] == "mine"
+    assert result["other_key"] == "from-someone-else"
+
+
+def test_save_world_builder_state_merges_into_world_continuity():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["world_continuity"] = {"guardian_presence": {"summons_enabled": True}}
+    web_ui._save_world_builder_state({"phase": "testing"})
+    wc = web_ui.app_state["world_continuity"]
+    # _save_world_builder_state hands off to _resolve_world_builder_state,
+    # which normalizes/expands the raw dict against defaults -- our custom
+    # field must survive that merge, not be replaced wholesale.
+    assert wc["world_builder"]["phase"] == "testing"
+    assert "synced_at" in wc
+    # Unrelated key from before the call must survive the merge-write.
+    assert wc["guardian_presence"] == {"summons_enabled": True}
+
+
+def test_resolve_guardian_presence_state_defaults_and_merge():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["world_continuity"] = {"world_builder": {"phase": "keep-me"}}
+    state = web_ui._resolve_guardian_presence_state()
+    assert state["summons_enabled"] is True
+    assert state["active_guardians"] == []
+    wc = web_ui.app_state["world_continuity"]
+    assert wc["guardian_presence"] == state
+    # Unrelated key must survive.
+    assert wc["world_builder"] == {"phase": "keep-me"}
