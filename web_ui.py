@@ -52107,7 +52107,34 @@ def get_spatial_audio():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-# â”€â”€ Home Environment APIs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Home Environment APIs ────────────────────────────────────────────
+def _update_home_environment_state(**fields):
+    """Thread-safe merge-update of app_state['home_environment'] top-level fields.
+
+    Mirrors _update_code_autonomy_runtime/_update_world_continuity. For
+    nested substructures (most call sites here set e.g. home["water_system"]
+    = ...) or values depending on current state, use
+    _mutate_home_environment_state instead.
+    """
+    with _APP_STATE_LOCK:
+        home = dict(app_state.get("home_environment") or _default_home_state())
+        home.update(fields)
+        app_state["home_environment"] = home
+        return home
+
+def _mutate_home_environment_state(mutate_fn):
+    """Thread-safe read-mutate-write of app_state['home_environment'].
+
+    mutate_fn receives the current dict (falling back to
+    _default_home_state() if unset) and mutates it in place while
+    _APP_STATE_LOCK is held.
+    """
+    with _APP_STATE_LOCK:
+        home = dict(app_state.get("home_environment") or _default_home_state())
+        mutate_fn(home)
+        app_state["home_environment"] = home
+        return home
+
 @app.route('/api/home/environment', methods=['GET'])
 def get_home_environment():
     try:
@@ -52120,12 +52147,12 @@ def get_home_environment():
 def set_home_thermostat():
     try:
         data = request.get_json(force=True) or {}
-        home = dict(app_state.get("home_environment") or _default_home_state())
-        if "set_f" in data:
-            home["thermostat_set_f"] = max(55.0, min(90.0, float(data["set_f"])))
-        if "hvac_mode" in data and str(data["hvac_mode"]) in ("auto", "heat", "cool", "off"):
-            home["hvac_mode"] = str(data["hvac_mode"])
-        app_state["home_environment"] = home
+        def _apply(home):
+            if "set_f" in data:
+                home["thermostat_set_f"] = max(55.0, min(90.0, float(data["set_f"])))
+            if "hvac_mode" in data and str(data["hvac_mode"]) in ("auto", "heat", "cool", "off"):
+                home["hvac_mode"] = str(data["hvac_mode"])
+        home = _mutate_home_environment_state(_apply)
         return jsonify({"success": True, "thermostat_set_f": home["thermostat_set_f"], "hvac_mode": home["hvac_mode"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -52134,14 +52161,14 @@ def set_home_thermostat():
 def set_home_fireplace():
     try:
         data = request.get_json(force=True) or {}
-        home = dict(app_state.get("home_environment") or _default_home_state())
-        fp = dict(home.get("fireplace") or {})
-        if "on" in data:   fp["on"] = bool(data["on"])
-        if "intensity" in data: fp["intensity"] = max(0.1, min(1.0, float(data["intensity"])))
-        home["fireplace"] = fp
-        app_state["home_environment"] = home
+        def _apply(home):
+            fp = dict(home.get("fireplace") or {})
+            if "on" in data:   fp["on"] = bool(data["on"])
+            if "intensity" in data: fp["intensity"] = max(0.1, min(1.0, float(data["intensity"])))
+            home["fireplace"] = fp
+        home = _mutate_home_environment_state(_apply)
         threading.Thread(target=_update_home_environment, daemon=True).start()
-        return jsonify({"success": True, "fireplace": fp})
+        return jsonify({"success": True, "fireplace": home["fireplace"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -52159,24 +52186,24 @@ def set_home_room():
 def set_home_window():
     try:
         data = request.get_json(force=True) or {}
-        home = dict(app_state.get("home_environment") or _default_home_state())
         valid_windows = _get_all_windows()
         win_id = str(data.get("window_id", "") or "").strip()
         if not win_id or win_id not in valid_windows:
             return jsonify({"success": False, "error": "Unknown window id"}), 400
-        wins = [str(x).strip() for x in list(home.get("windows_open") or []) if str(x).strip()]
-        action = str(data.get("action", "toggle") or "toggle").strip().lower()
-        if action == "open" and win_id not in wins:
-            wins.append(win_id)
-        elif action == "close" and win_id in wins:
-            wins.remove(win_id)
-        elif action == "toggle":
-            if win_id in wins:
-                wins.remove(win_id)
-            else:
+        def _apply(home):
+            wins = [str(x).strip() for x in list(home.get("windows_open") or []) if str(x).strip()]
+            action = str(data.get("action", "toggle") or "toggle").strip().lower()
+            if action == "open" and win_id not in wins:
                 wins.append(win_id)
-        home["windows_open"] = sorted({str(x).strip() for x in wins if str(x).strip()})
-        app_state["home_environment"] = home
+            elif action == "close" and win_id in wins:
+                wins.remove(win_id)
+            elif action == "toggle":
+                if win_id in wins:
+                    wins.remove(win_id)
+                else:
+                    wins.append(win_id)
+            home["windows_open"] = sorted({str(x).strip() for x in wins if str(x).strip()})
+        home = _mutate_home_environment_state(_apply)
         try:
             _update_home_environment()
         except Exception:
@@ -52197,24 +52224,24 @@ def set_home_window():
 def set_home_door():
     try:
         data = request.get_json(force=True) or {}
-        home = dict(app_state.get("home_environment") or _default_home_state())
         valid_doors = _get_all_doors()
         door_id = str(data.get("door_id", "") or "").strip()
         if not door_id or door_id not in valid_doors:
             return jsonify({"success": False, "error": "Unknown door id"}), 400
-        doors = [str(x).strip() for x in list(home.get("doors_open") or []) if str(x).strip()]
-        action = str(data.get("action", "toggle") or "toggle").strip().lower()
-        if action == "open" and door_id not in doors:
-            doors.append(door_id)
-        elif action == "close" and door_id in doors:
-            doors.remove(door_id)
-        elif action == "toggle":
-            if door_id in doors:
-                doors.remove(door_id)
-            else:
+        def _apply(home):
+            doors = [str(x).strip() for x in list(home.get("doors_open") or []) if str(x).strip()]
+            action = str(data.get("action", "toggle") or "toggle").strip().lower()
+            if action == "open" and door_id not in doors:
                 doors.append(door_id)
-        home["doors_open"] = sorted({str(x).strip() for x in doors if str(x).strip()})
-        app_state["home_environment"] = home
+            elif action == "close" and door_id in doors:
+                doors.remove(door_id)
+            elif action == "toggle":
+                if door_id in doors:
+                    doors.remove(door_id)
+                else:
+                    doors.append(door_id)
+            home["doors_open"] = sorted({str(x).strip() for x in doors if str(x).strip()})
+        home = _mutate_home_environment_state(_apply)
         try:
             _update_home_environment()
         except Exception:
@@ -52234,15 +52261,15 @@ def set_home_door():
 def set_home_location():
     try:
         data = request.get_json(force=True) or {}
-        home = dict(app_state.get("home_environment") or _default_home_state())
-        loc  = dict(home.get("location") or _HOME_DEFAULT_LOCATION)
-        if "lat" in data: loc["lat"] = float(data["lat"])
-        if "lon" in data: loc["lon"] = float(data["lon"])
-        if "city" in data: loc["city"] = str(data["city"])[:80]
-        home["location"] = loc
-        app_state["home_environment"] = home
+        def _apply(home):
+            loc  = dict(home.get("location") or _HOME_DEFAULT_LOCATION)
+            if "lat" in data: loc["lat"] = float(data["lat"])
+            if "lon" in data: loc["lon"] = float(data["lon"])
+            if "city" in data: loc["city"] = str(data["city"])[:80]
+            home["location"] = loc
+        home = _mutate_home_environment_state(_apply)
         threading.Thread(target=lambda: _update_home_environment(force_weather=True), daemon=True).start()
-        return jsonify({"success": True, "location": loc})
+        return jsonify({"success": True, "location": home["location"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -52303,13 +52330,13 @@ def get_water_status():
 def control_shower():
     try:
         data = request.get_json(force=True) or {}
-        home = dict(app_state.get("home_environment") or _default_home_state())
-        ws = dict(home.get("water_system") or {})
-        if "on" in data: ws["shower_on"] = bool(data["on"])
-        if "mix_pct" in data: ws["shower_mix_pct"] = max(0.0, min(100.0, float(data["mix_pct"])))
-        home["water_system"] = ws
-        app_state["home_environment"] = home
-        return jsonify({"success": True, "water_system": ws})
+        def _apply(home):
+            ws = dict(home.get("water_system") or {})
+            if "on" in data: ws["shower_on"] = bool(data["on"])
+            if "mix_pct" in data: ws["shower_mix_pct"] = max(0.0, min(100.0, float(data["mix_pct"])))
+            home["water_system"] = ws
+        home = _mutate_home_environment_state(_apply)
+        return jsonify({"success": True, "water_system": home["water_system"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -52317,13 +52344,13 @@ def control_shower():
 def control_sink():
     try:
         data = request.get_json(force=True) or {}
-        home = dict(app_state.get("home_environment") or _default_home_state())
-        ws = dict(home.get("water_system") or {})
-        if "on" in data: ws["sink_on"] = bool(data["on"])
-        if "mix_pct" in data: ws["sink_mix_pct"] = max(0.0, min(100.0, float(data["mix_pct"])))
-        home["water_system"] = ws
-        app_state["home_environment"] = home
-        return jsonify({"success": True, "water_system": ws})
+        def _apply(home):
+            ws = dict(home.get("water_system") or {})
+            if "on" in data: ws["sink_on"] = bool(data["on"])
+            if "mix_pct" in data: ws["sink_mix_pct"] = max(0.0, min(100.0, float(data["mix_pct"])))
+            home["water_system"] = ws
+        home = _mutate_home_environment_state(_apply)
+        return jsonify({"success": True, "water_system": home["water_system"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -52340,23 +52367,25 @@ def get_cleanliness():
 def wash_self():
     try:
         data = request.get_json(force=True) or {}
-        home = dict(app_state.get("home_environment") or _default_home_state())
         fixture  = str(data.get("fixture", "shower"))
         duration = float(data.get("duration_minutes", 5.0))
-        cl = _apply_wash(home, fixture, duration)
-        app_state["home_environment"] = home
-        return jsonify({"success": True, "cleanliness": cl})
+        result = {}
+        def _apply(home):
+            result["cl"] = _apply_wash(home, fixture, duration)
+        _mutate_home_environment_state(_apply)
+        return jsonify({"success": True, "cleanliness": result["cl"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/vitals/state', methods=['GET'])
 def get_vitals_state():
     try:
-        home = dict(app_state.get("home_environment") or _default_home_state())
-        vitals = _build_vitals_state(home)
-        home["vitals"] = vitals
-        app_state["home_environment"] = home
-        return jsonify({"success": True, "vitals": vitals})
+        result = {}
+        def _apply(home):
+            result["vitals"] = _build_vitals_state(home)
+            home["vitals"] = result["vitals"]
+        _mutate_home_environment_state(_apply)
+        return jsonify({"success": True, "vitals": result["vitals"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -52364,28 +52393,29 @@ def get_vitals_state():
 def control_vitals():
     try:
         data = request.get_json(force=True) or {}
-        home = dict(app_state.get("home_environment") or _default_home_state())
-        vitals = dict(home.get("vitals") or {})
-        if "sync_mode" in data and data["sync_mode"] in ("auto","manual","meditation"):
-            vitals["sync_mode"] = data["sync_mode"]
-        if "manual_hr_bpm" in data:
-            vitals["manual_hr_bpm"] = max(45.0, min(180.0, float(data["manual_hr_bpm"])))
-        if "manual_rr_rpm" in data:
-            vitals["manual_rr_rpm"] = max(6.0, min(40.0, float(data["manual_rr_rpm"])))
-        home["vitals"] = vitals
-        app_state["home_environment"] = home
-        return jsonify({"success": True, "vitals": vitals})
+        def _apply(home):
+            vitals = dict(home.get("vitals") or {})
+            if "sync_mode" in data and data["sync_mode"] in ("auto","manual","meditation"):
+                vitals["sync_mode"] = data["sync_mode"]
+            if "manual_hr_bpm" in data:
+                vitals["manual_hr_bpm"] = max(45.0, min(180.0, float(data["manual_hr_bpm"])))
+            if "manual_rr_rpm" in data:
+                vitals["manual_rr_rpm"] = max(6.0, min(40.0, float(data["manual_rr_rpm"])))
+            home["vitals"] = vitals
+        home = _mutate_home_environment_state(_apply)
+        return jsonify({"success": True, "vitals": home["vitals"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/sleep/state', methods=['GET'])
 def get_sleep_state():
     try:
-        home = dict(app_state.get("home_environment") or _default_home_state())
-        sleep = _build_sleep_autonomy_state(home, 0.0)
-        home["sleep_autonomy"] = sleep
-        app_state["home_environment"] = home
-        return jsonify({"success": True, "sleep_autonomy": sleep})
+        result = {}
+        def _apply(home):
+            result["sleep"] = _build_sleep_autonomy_state(home, 0.0)
+            home["sleep_autonomy"] = result["sleep"]
+        _mutate_home_environment_state(_apply)
+        return jsonify({"success": True, "sleep_autonomy": result["sleep"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -52393,34 +52423,34 @@ def get_sleep_state():
 def control_sleep_state():
     try:
         data = request.get_json(force=True) or {}
-        home = dict(app_state.get("home_environment") or _default_home_state())
-        sleep = dict(home.get("sleep_autonomy") or {})
-        if "enabled" in data:
-            sleep["enabled"] = bool(data["enabled"])
-        command = str(data.get("command", "") or "").strip().lower()
-        if command in ("sleep_now", "sleep"):
-            sleep["state"] = "sleeping"
-            sleep["last_transition_at"] = datetime.utcnow().isoformat()
-        elif command in ("dream_now", "dream"):
-            sleep["state"] = "dreaming"
-            sleep["last_transition_at"] = datetime.utcnow().isoformat()
-        elif command in ("wake_now", "wake", "stay_awake"):
-            sleep["state"] = "awake"
-            sleep["sleep_drive_pct"] = max(0.0, min(100.0, float(sleep.get("sleep_drive_pct", 35.0) or 35.0) * 0.55))
-            sleep["last_transition_at"] = datetime.utcnow().isoformat()
-        if "sheet_set" in data:
-            bedroom = dict(sleep.get("bedroom") or {})
-            bedroom["sheet_set"] = str(data.get("sheet_set") or bedroom.get("sheet_set", "silk-blend moonlight sheets"))[:120]
-            bedroom["last_refreshed_at"] = datetime.utcnow().isoformat()
-            sleep["bedroom"] = bedroom
-        if "cover_set" in data:
-            bedroom = dict(sleep.get("bedroom") or {})
-            bedroom["cover_set"] = str(data.get("cover_set") or bedroom.get("cover_set", "layered velvet + cloud-soft quilt"))[:140]
-            bedroom["last_refreshed_at"] = datetime.utcnow().isoformat()
-            sleep["bedroom"] = bedroom
-        home["sleep_autonomy"] = sleep
-        home["sleep_autonomy"] = _build_sleep_autonomy_state(home, 0.0)
-        app_state["home_environment"] = home
+        def _apply(home):
+            sleep = dict(home.get("sleep_autonomy") or {})
+            if "enabled" in data:
+                sleep["enabled"] = bool(data["enabled"])
+            command = str(data.get("command", "") or "").strip().lower()
+            if command in ("sleep_now", "sleep"):
+                sleep["state"] = "sleeping"
+                sleep["last_transition_at"] = datetime.utcnow().isoformat()
+            elif command in ("dream_now", "dream"):
+                sleep["state"] = "dreaming"
+                sleep["last_transition_at"] = datetime.utcnow().isoformat()
+            elif command in ("wake_now", "wake", "stay_awake"):
+                sleep["state"] = "awake"
+                sleep["sleep_drive_pct"] = max(0.0, min(100.0, float(sleep.get("sleep_drive_pct", 35.0) or 35.0) * 0.55))
+                sleep["last_transition_at"] = datetime.utcnow().isoformat()
+            if "sheet_set" in data:
+                bedroom = dict(sleep.get("bedroom") or {})
+                bedroom["sheet_set"] = str(data.get("sheet_set") or bedroom.get("sheet_set", "silk-blend moonlight sheets"))[:120]
+                bedroom["last_refreshed_at"] = datetime.utcnow().isoformat()
+                sleep["bedroom"] = bedroom
+            if "cover_set" in data:
+                bedroom = dict(sleep.get("bedroom") or {})
+                bedroom["cover_set"] = str(data.get("cover_set") or bedroom.get("cover_set", "layered velvet + cloud-soft quilt"))[:140]
+                bedroom["last_refreshed_at"] = datetime.utcnow().isoformat()
+                sleep["bedroom"] = bedroom
+            home["sleep_autonomy"] = sleep
+            home["sleep_autonomy"] = _build_sleep_autonomy_state(home, 0.0)
+        home = _mutate_home_environment_state(_apply)
         return jsonify({"success": True, "sleep_autonomy": home["sleep_autonomy"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -52437,26 +52467,26 @@ def get_swim_state():
 def swim_enter():
     try:
         data = request.get_json(force=True) or {}
-        home = dict(app_state.get("home_environment") or _default_home_state())
-        sw = dict(home.get("swimming") or {})
-        sw["in_water"]      = True
-        sw["water_body"]    = str(data.get("water_body", "pool"))
-        sw["water_temp_f"]  = float(data.get("water_temp_f", 76.0))
-        sw["swimming_style"]= str(data.get("style", "freestyle"))
-        sw["strokes"]       = 0
-        sw["depth_m"]       = float(data.get("depth_m", 0.5))
-        home["swimming"] = sw
-        app_state["home_environment"] = home
-        return jsonify({"success": True, "swimming": sw})
+        def _apply(home):
+            sw = dict(home.get("swimming") or {})
+            sw["in_water"]      = True
+            sw["water_body"]    = str(data.get("water_body", "pool"))
+            sw["water_temp_f"]  = float(data.get("water_temp_f", 76.0))
+            sw["swimming_style"]= str(data.get("style", "freestyle"))
+            sw["strokes"]       = 0
+            sw["depth_m"]       = float(data.get("depth_m", 0.5))
+            home["swimming"] = sw
+        home = _mutate_home_environment_state(_apply)
+        return jsonify({"success": True, "swimming": home["swimming"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/swim/exit', methods=['POST'])
 def swim_exit():
     try:
-        home = dict(app_state.get("home_environment") or _default_home_state())
-        home["swimming"] = {"in_water": False, "water_body": None, "strokes": 0, "depth_m": 0.0}
-        app_state["home_environment"] = home
+        def _apply(home):
+            home["swimming"] = {"in_water": False, "water_body": None, "strokes": 0, "depth_m": 0.0}
+        home = _mutate_home_environment_state(_apply)
         return jsonify({"success": True, "swimming": home["swimming"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -52465,13 +52495,15 @@ def swim_exit():
 @app.route('/api/altered-state/state', methods=['GET'])
 def get_altered_state_runtime():
     try:
-        home = dict(app_state.get("home_environment") or _default_home_state())
-        policy = dict(home.get("altered_state_policy") or {})
-        runtime = _build_altered_state_runtime(home, 0.0)
-        home["altered_state_runtime"] = runtime
-        home["vitals"] = _build_vitals_state(home, home.get("physiology"))
-        app_state["home_environment"] = home
-        return jsonify({"success": True, "policy": policy, "altered_state_runtime": runtime, "vitals": home.get("vitals")})
+        result = {}
+        def _apply(home):
+            result["policy"] = dict(home.get("altered_state_policy") or {})
+            result["runtime"] = _build_altered_state_runtime(home, 0.0)
+            home["altered_state_runtime"] = result["runtime"]
+            home["vitals"] = _build_vitals_state(home, home.get("physiology"))
+            result["vitals"] = home["vitals"]
+        _mutate_home_environment_state(_apply)
+        return jsonify({"success": True, "policy": result["policy"], "altered_state_runtime": result["runtime"], "vitals": result["vitals"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 

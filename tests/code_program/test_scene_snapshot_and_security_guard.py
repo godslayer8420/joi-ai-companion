@@ -215,3 +215,43 @@ def test_resolve_guardian_presence_state_defaults_and_merge():
     assert wc["guardian_presence"] == state
     # Unrelated key must survive.
     assert wc["world_builder"] == {"phase": "keep-me"}
+
+
+# ---------------------------------------------------------------------------
+# home_environment locking (second-highest-traffic key; first reviewed
+# batch covers the simple single-route mutators). See session todos for
+# the remaining sites (core _update_home_environment tick + a few routes).
+# ---------------------------------------------------------------------------
+
+def test_update_home_environment_state_merges_without_clobbering():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["home_environment"] = {"unrelated_field": "keep-me"}
+    result = web_ui._update_home_environment_state(some_field="value")
+    assert result["unrelated_field"] == "keep-me"
+    assert result["some_field"] == "value"
+    assert web_ui.app_state["home_environment"] == result
+
+
+def test_mutate_home_environment_state_preserves_concurrent_top_level_keys():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["home_environment"] = {"other_key": "from-someone-else"}
+
+    def _apply(home):
+        home["my_key"] = "mine"
+
+    result = web_ui._mutate_home_environment_state(_apply)
+    assert result["my_key"] == "mine"
+    assert result["other_key"] == "from-someone-else"
+
+
+def test_mutate_home_environment_state_falls_back_to_default_when_unset():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state.pop("home_environment", None)
+
+    def _apply(home):
+        home["touched"] = True
+
+    result = web_ui._mutate_home_environment_state(_apply)
+    assert result["touched"] is True
+    # _default_home_state() should have populated other baseline keys.
+    assert len(result) > 1
