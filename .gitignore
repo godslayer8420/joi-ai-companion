@@ -1,6 +1,21 @@
 venv/
+venv.old*/
 __pycache__/
 model/
 *.pyc
 .vscode/
 joi_memory.json
+
+# Secrets — never commit .env; use .env.example for documented keys instead
+.env
+.env.*
+!.env.example
+
+# Build/packaging outputs and local tooling caches
+build/
+dist/
+.tools/
+.pytest_cache/
+android/**/.gradle/
+android/**/build/
+.aurion_downloads/
