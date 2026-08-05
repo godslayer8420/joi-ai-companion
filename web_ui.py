@@ -3145,35 +3145,39 @@ def _apply_navigation_state(location_id, source="navigation", route=None):
 
     location_id = _resolve_navigation_target_id(location_id, rooms=rooms, zones=zones, places=places)
     resolved_location_id = location_id
+    updated_world_builder = None
+    home_updates = {}
     if location_id in places:
         place = dict(places.get(location_id) or {})
         anchor_room = str(place.get("anchor_room", "")).strip()
         if anchor_room in rooms:
-            home["current_room"] = anchor_room
-            home["current_level"] = str((rooms.get(anchor_room) or {}).get("level", home.get("current_level", "lower")) or "lower")
+            home_updates["current_room"] = anchor_room
+            home_updates["current_level"] = str((rooms.get(anchor_room) or {}).get("level", home.get("current_level", "lower")) or "lower")
         builder = dict(world_builder)
         builder["active_place_id"] = location_id
-        wc["world_builder"] = builder
+        updated_world_builder = builder
     elif location_id in rooms:
         room = dict(rooms.get(location_id) or {})
-        home["current_room"] = location_id
-        home["current_level"] = str(room.get("level", home.get("current_level", "lower")) or "lower")
+        home_updates["current_room"] = location_id
+        home_updates["current_level"] = str(room.get("level", home.get("current_level", "lower")) or "lower")
         builder = dict(world_builder)
         builder["active_place_id"] = ""
-        wc["world_builder"] = builder
+        updated_world_builder = builder
         resolved_location_id = location_id
     elif location_id in zones:
         zone = dict(zones.get(location_id) or {})
         adjacent_room = str(zone.get("adjacent_room", "")).strip()
         if adjacent_room in rooms:
-            home["current_room"] = adjacent_room
-            home["current_level"] = str((rooms.get(adjacent_room) or {}).get("level", home.get("current_level", "lower")) or "lower")
+            home_updates["current_room"] = adjacent_room
+            home_updates["current_level"] = str((rooms.get(adjacent_room) or {}).get("level", home.get("current_level", "lower")) or "lower")
         builder = dict(world_builder)
         matching_place_id = _resolve_navigation_target_id(location_id, rooms=rooms, zones=zones, places=places, prefer="place")
         builder["active_place_id"] = matching_place_id if matching_place_id in places else ""
-        wc["world_builder"] = builder
+        updated_world_builder = builder
     else:
         raise ValueError("Unknown navigation target")
+    wc["world_builder"] = updated_world_builder
+    home.update(home_updates)
 
     sight = _build_navigation_sight(resolved_location_id)
     visual_perception = _build_visual_perception_payload(sight.get("summary", ""), source=f"navigation:{resolved_location_id}")
@@ -3200,7 +3204,6 @@ def _apply_navigation_state(location_id, source="navigation", route=None):
         "route": route if route.get("found") else None,
         "last_arrival_at": datetime.utcnow().isoformat(),
     })
-    wc["world_mobility"] = world_mobility
     player_character = _resolve_player_character_state()
     player_runtime = dict(player_character.get("runtime") or {})
     player_runtime["current_location_id"] = resolved_location_id
@@ -3215,22 +3218,39 @@ def _apply_navigation_state(location_id, source="navigation", route=None):
     player_character["last_updated_at"] = datetime.utcnow().isoformat()
     app_state["player_character"] = player_character
 
-    wc["saved_activity"] = {
+    saved_activity = {
         "activity": "navigation",
         "location": str(sight.get("location_label", resolved_location_id) or resolved_location_id),
         "source": str(source or "navigation")[:40],
         "details": str(sight.get("summary", "") or "")[:240],
         "savedAt": datetime.utcnow().isoformat(),
     }
-    wc["last_navigation_target"] = resolved_location_id
-    wc["synced_at"] = datetime.utcnow().isoformat()
 
-    app_state["home_environment"] = home
-    app_state["world_continuity"] = wc
+    # Two separate atomic, per-key merge-writes (not one cross-key
+    # transaction -- see _apply_navigation_state's note in
+    # p1-lock-world-continuity-key/p1-lock-home-environment-key session
+    # todos for why a true 3-key atomic write would need a bigger redesign).
+    # Each write below is still a real improvement over the prior blind
+    # whole-dict overwrite: it re-merges against whatever is currently in
+    # app_state at write time instead of clobbering concurrent unrelated
+    # field changes with a stale snapshot captured at the top of this call.
+    # home_updates only contains current_room/current_level when this call
+    # actually changed them, so a branch that didn't move rooms never
+    # re-writes (and can't clobber a concurrent unrelated home change).
+    resolved_home = _update_home_environment_state(**home_updates) if home_updates else dict(app_state.get("home_environment") or _default_home_state())
+
+    def _apply_wc(wc_inner):
+        wc_inner["world_builder"] = updated_world_builder
+        wc_inner["world_mobility"] = world_mobility
+        wc_inner["saved_activity"] = saved_activity
+        wc_inner["last_navigation_target"] = resolved_location_id
+        wc_inner["synced_at"] = datetime.utcnow().isoformat()
+    resolved_wc = _mutate_world_continuity(_apply_wc)
+
     return {
-        "current_room": str(home.get("current_room", "living_room") or "living_room"),
-        "current_level": str(home.get("current_level", "lower") or "lower"),
-        "active_place_id": str((((wc.get("world_builder") or {}).get("active_place_id")) or "")).strip(),
+        "current_room": str(resolved_home.get("current_room", "living_room") or "living_room"),
+        "current_level": str(resolved_home.get("current_level", "lower") or "lower"),
+        "active_place_id": str((((resolved_wc.get("world_builder") or {}).get("active_place_id")) or "")).strip(),
         "sight": sight,
         "player_character": player_character,
     }
@@ -4674,8 +4694,9 @@ def _resolve_world_builder_state():
     state["autonomy_enabled"] = bool(state.get("autonomy_enabled", True))
     state = _ensure_basement_world_layers(state)
     state["last_updated_at"] = datetime.utcnow().isoformat()
-    wc["world_builder"] = state
-    app_state["world_continuity"] = wc
+    def _apply(wc_inner):
+        wc_inner["world_builder"] = state
+    _mutate_world_continuity(_apply)
     return state
 
 
@@ -7109,13 +7130,13 @@ def _resolve_senses_runtime_state(force_rebuild=False):
     home = dict(app_state.get("home_environment") or _default_home_state())
     existing = dict(home.get("sensory") or {})
     if force_rebuild or not existing.get("thermoception"):
-        home["sensory"] = _build_senses_runtime_state(home)
-        app_state["home_environment"] = home
+        new_sensory = _build_senses_runtime_state(home)
     else:
-        merged = _build_senses_runtime_state(home)
-        merged.update({k: v for k, v in existing.items() if v not in (None, "")})
-        home["sensory"] = merged
-        app_state["home_environment"] = home
+        new_sensory = _build_senses_runtime_state(home)
+        new_sensory.update({k: v for k, v in existing.items() if v not in (None, "")})
+    def _apply(home_inner):
+        home_inner["sensory"] = new_sensory
+    home = _mutate_home_environment_state(_apply)
     app_state["senses_runtime"] = dict(home.get("sensory") or {})
     return dict(app_state.get("senses_runtime") or _default_senses_runtime_state())
 
@@ -10667,7 +10688,7 @@ def _build_system_health_snapshot(strict=False):
 
 
 def _harmonize_full_runtime():
-    app_state["home_environment"] = dict(app_state.get("home_environment") or _default_home_state())
+    _update_home_environment_state()
     _resolve_senses_runtime_state(force_rebuild=True)
     _resolve_memory_continuity_state()
     _resolve_video_runtime_state()
@@ -52672,9 +52693,11 @@ def use_altered_state_effect():
                 cumulative_load[key] = 0.0
         cumulative_load[substance] = round(cumulative_load.get(substance, 0.0) + dose_units, 4)
         runtime["cumulative_load"] = cumulative_load
-        home["altered_state_runtime"] = _build_altered_state_runtime(dict(home, altered_state_runtime=runtime), 0.0)
-        home["vitals"] = _build_vitals_state(home, home.get("physiology"))
-        app_state["home_environment"] = home
+        new_altered_state_runtime = _build_altered_state_runtime(dict(home, altered_state_runtime=runtime), 0.0)
+        def _apply(home_inner):
+            home_inner["altered_state_runtime"] = new_altered_state_runtime
+            home_inner["vitals"] = _build_vitals_state(home_inner, home_inner.get("physiology"))
+        home = _mutate_home_environment_state(_apply)
         return jsonify({"success": True, "effect": entry, "altered_state_runtime": home.get("altered_state_runtime"), "vitals": home.get("vitals")})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -52694,9 +52717,10 @@ def update_altered_state_policy():
             policy["psychedelics_legal"] = bool(data.get("psychedelics_legal"))
         if "real_time_effects" in data:
             policy["real_time_effects"] = bool(data.get("real_time_effects"))
-        home["altered_state_policy"] = policy
-        home["altered_state_runtime"] = _build_altered_state_runtime(home, 0.0)
-        app_state["home_environment"] = home
+        def _apply(home_inner):
+            home_inner["altered_state_policy"] = policy
+            home_inner["altered_state_runtime"] = _build_altered_state_runtime(home_inner, 0.0)
+        home = _mutate_home_environment_state(_apply)
         return jsonify({"success": True, "policy": policy, "altered_state_runtime": home.get("altered_state_runtime")})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -53559,11 +53583,12 @@ def github_implement_from_download():
 def get_vitals_status_compat():
     """Backward-compatible alias for older UI calls."""
     try:
-        home = dict(app_state.get("home_environment") or _default_home_state())
-        vitals = _build_vitals_state(home)
-        home["vitals"] = vitals
-        app_state["home_environment"] = home
-        return jsonify({"success": True, "vitals": vitals})
+        result = {}
+        def _apply(home):
+            result["vitals"] = _build_vitals_state(home)
+            home["vitals"] = result["vitals"]
+        _mutate_home_environment_state(_apply)
+        return jsonify({"success": True, "vitals": result["vitals"]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -58142,9 +58167,10 @@ def update_taste_perception():
             kitchen["current_dish"] = current_dish[:320]
         if taste_profile:
             kitchen["taste_profile"] = taste_profile[:80]
-        home["sensory"] = sensory
-        home["kitchen"] = kitchen
-        app_state["home_environment"] = home
+        def _apply(home_inner):
+            home_inner["sensory"] = sensory
+            home_inner["kitchen"] = kitchen
+        _mutate_home_environment_state(_apply)
         _persist_live_senses_snapshot(reason="taste-perception")
         return jsonify({
             "success": True,

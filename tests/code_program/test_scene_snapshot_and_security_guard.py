@@ -276,6 +276,34 @@ def test_resolve_special_ability_registry_defaults_and_merge():
     assert wc["world_builder"] == {"phase": "keep-me"}
 
 
+def test_resolve_world_builder_state_preserves_concurrent_key():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["world_continuity"] = {"guardian_presence": {"summons_enabled": True}}
+    state = web_ui._resolve_world_builder_state()
+    assert isinstance(state.get("places"), list)
+    wc = web_ui.app_state["world_continuity"]
+    assert wc["world_builder"] == state
+    # Unrelated key must survive the merge-write.
+    assert wc["guardian_presence"] == {"summons_enabled": True}
+
+
+def test_apply_navigation_state_locks_world_continuity_and_home_environment():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["world_continuity"] = {"guardian_presence": {"summons_enabled": True}}
+        web_ui.app_state["home_environment"] = {"fireplace": {"on": True}}
+    result = web_ui._apply_navigation_state("living_room", source="test")
+    assert result["current_room"] == "living_room"
+    wc = web_ui.app_state["world_continuity"]
+    assert wc["world_mobility"]["current_location_id"] == "living_room"
+    assert wc["last_navigation_target"] == "living_room"
+    # Unrelated world_continuity key must survive the merge-write.
+    assert wc["guardian_presence"] == {"summons_enabled": True}
+    home = web_ui.app_state["home_environment"]
+    assert home["current_room"] == "living_room"
+    # Unrelated home_environment key must survive the merge-write.
+    assert home["fireplace"] == {"on": True}
+
+
 def test_world_force_state_round_trips_through_world_continuity():
     with web_ui._APP_STATE_LOCK:
         web_ui.app_state["world_continuity"] = {"guardian_presence": {"summons_enabled": True}}
@@ -302,6 +330,52 @@ def test_time_control_state_round_trips_through_world_continuity():
     assert wc["time_control"] == state
     # Unrelated key must survive.
     assert wc["guardian_presence"] == {"summons_enabled": True}
+
+
+# ---------------------------------------------------------------------------
+# home_environment locking, second batch: remaining simple single-purpose
+# routes plus _resolve_senses_runtime_state. _update_home_environment (the
+# core autonomy tick, touching 5+ app_state keys together) remains
+# deliberately deferred -- see session todos.
+# ---------------------------------------------------------------------------
+
+def test_resolve_senses_runtime_state_locks_home_environment():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["home_environment"] = {"fireplace": {"on": True}}
+    result = web_ui._resolve_senses_runtime_state(force_rebuild=True)
+    assert "thermoception" in result
+    home = web_ui.app_state["home_environment"]
+    assert home["sensory"] == result
+    # Unrelated key must survive the merge-write.
+    assert home["fireplace"] == {"on": True}
+
+
+def test_vitals_status_compat_route_locks_home_environment():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["home_environment"] = {"fireplace": {"on": True}}
+    client = web_ui.app.test_client()
+    resp = client.get("/api/vitals/status")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["success"] is True
+    assert "hr_bpm" in payload["vitals"] or "sync_mode" in payload["vitals"]
+    home = web_ui.app_state["home_environment"]
+    assert home["vitals"] == payload["vitals"]
+    # Unrelated key must survive the merge-write.
+    assert home["fireplace"] == {"on": True}
+
+
+def test_taste_perception_route_locks_home_environment_without_clobbering():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["home_environment"] = {"fireplace": {"on": True}}
+    client = web_ui.app.test_client()
+    resp = client.post("/api/taste/perception", json={"summary": "Sweet and citrusy.", "current_dish": "Lemon tart"})
+    assert resp.status_code == 200
+    home = web_ui.app_state["home_environment"]
+    assert home["sensory"]["taste_perception"] == "Sweet and citrusy."
+    assert home["kitchen"]["current_dish"] == "Lemon tart"
+    # Unrelated key must survive the merge-write.
+    assert home["fireplace"] == {"on": True}
 
 
 def test_resolve_special_ability_registry_round_trip_via_grant():
