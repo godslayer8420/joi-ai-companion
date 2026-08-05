@@ -1795,7 +1795,7 @@ def _resolve_code_autonomy_target():
     configured = str(os.getenv("AURION_CODE_AUTONOMY_TARGET_FILE", "")).strip()
     if configured:
         return configured
-    return r"joi_companion\aurion_runtime\aurion_self_edits.py"
+    return r"joi_companion\data\memory\aurion_notes.jsonl"
 
 # Initialize Joi systems
 personality_engine = PersonalityEngine()
@@ -17396,6 +17396,42 @@ def _apply_repo_code_edit(path_text, content, mode="append", create_if_missing=T
         "updated_at": datetime.utcfromtimestamp(stat.st_mtime).isoformat() + "Z"
     }
 
+_AUTONOMOUS_NOTE_LOG_LOCK = threading.Lock()
+_AUTONOMOUS_NOTE_LOG_MAX_ENTRIES = 2000
+
+def _append_autonomous_note_log(path_text, entry, max_entries=_AUTONOMOUS_NOTE_LOG_MAX_ENTRIES):
+    """Thread-safe append-with-rotation to a JSONL autonomous-note log.
+
+    Used for Aurion's default self-edit/auto-tick continuity notes instead
+    of appending Python-function-shaped text to a .py file (see
+    joi_companion/data/memory/README.md for why). Keeps at most
+    max_entries lines, trimming the oldest first, so this log can never
+    grow unbounded the way aurion_self_edits.py did.
+    """
+    target, relative = _resolve_repo_scoped_path(path_text)
+    with _AUTONOMOUS_NOTE_LOG_LOCK:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        if target.exists():
+            try:
+                existing = _read_text_file(target, max_chars=20_000_000)
+                lines = [ln for ln in existing.splitlines() if ln.strip()]
+            except Exception:
+                lines = []
+        lines.append(json.dumps(entry, ensure_ascii=False))
+        if len(lines) > max_entries:
+            lines = lines[-max_entries:]
+        _write_text_file(target, "\n".join(lines) + "\n")
+        entry_count = len(lines)
+    stat = target.stat()
+    return {
+        "path": str(target),
+        "relative_path": relative,
+        "bytes": int(stat.st_size),
+        "updated_at": datetime.utcfromtimestamp(stat.st_mtime).isoformat() + "Z",
+        "entry_count": entry_count,
+    }
+
 def _artifact_export_root():
     root = _repo_root_path() / ".aurion_exports"
     root.mkdir(parents=True, exist_ok=True)
@@ -18540,20 +18576,34 @@ def _should_autonomous_self_fix(user_text, response, trigger_source="chat"):
 def _write_autonomous_self_fix_note(user_text="", response="", trigger_source="chat"):
     cfg = _sanitize_code_autonomy_settings(app_state.get("code_autonomy", {}))
     target_file = _guess_code_target_from_text(user_text, response, cfg.get("target_file"))
-    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     issue = re.sub(r"\s+", " ", str(user_text or "").strip())[:180] or "Autonomous self-fix review"
     summary = re.sub(r"\s+", " ", str(response or "").strip())[:220] or "Self-fix checkpoint captured."
-    snippet = (
-        f"\n\ndef aurion_self_fix_note_{stamp}():\n"
-        f"    \"\"\"Autonomous self-fix checkpoint generated at {datetime.utcnow().isoformat()} UTC via {trigger_source}.\"\"\"\n"
-        f"    return {{\"issue\": {json.dumps(issue)}, \"summary\": {json.dumps(summary)}, \"source\": {json.dumps(trigger_source)}}}\n"
-    )
-    result = _apply_repo_code_edit(
-        target_file,
-        snippet,
-        mode=cfg.get("mode", "append"),
-        create_if_missing=True
-    )
+    if str(target_file).strip().lower().endswith(".jsonl"):
+        # Default/no-explicit-file case: structured data, not a fake
+        # Python source snippet -- see joi_companion/data/memory/README.md.
+        entry = {
+            "kind": "self_fix",
+            "at": datetime.utcnow().isoformat() + "Z",
+            "trigger_source": trigger_source,
+            "issue": issue,
+            "summary": summary,
+        }
+        result = _append_autonomous_note_log(target_file, entry)
+    else:
+        # An explicit repo file was named in the conversation -- keep
+        # editing it as real source via the existing Python-note format.
+        stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        snippet = (
+            f"\n\ndef aurion_self_fix_note_{stamp}():\n"
+            f"    \"\"\"Autonomous self-fix checkpoint generated at {datetime.utcnow().isoformat()} UTC via {trigger_source}.\"\"\"\n"
+            f"    return {{\"issue\": {json.dumps(issue)}, \"summary\": {json.dumps(summary)}, \"source\": {json.dumps(trigger_source)}}}\n"
+        )
+        result = _apply_repo_code_edit(
+            target_file,
+            snippet,
+            mode=cfg.get("mode", "append"),
+            create_if_missing=True
+        )
     runtime = _update_code_autonomy_runtime(
         last_self_fix_at=datetime.utcnow().isoformat(),
         last_self_fix_target=str(result.get("relative_path") or target_file),
@@ -18622,12 +18672,60 @@ def _autonomous_code_edit_tick(user_text="", response="", force=False, trigger_s
     if not _should_autonomous_code_edit(user_text, response, force=force):
         return None
     cfg = _sanitize_code_autonomy_settings(app_state.get("code_autonomy", {}))
-    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     insight = re.sub(r"\s+", " ", str(response or "").strip())[:180]
     user_hint = re.sub(r"\s+", " ", str(user_text or "").strip())[:140]
     if not insight:
         insight = "Autonomous continuity checkpoint."
     target_file = _guess_code_target_from_text(user_text, response, cfg.get("target_file"))
+
+    _update_code_autonomy_runtime(
+        last_attempt_at=datetime.utcnow().isoformat(),
+        last_target_file=str(target_file),
+    )
+
+    if str(target_file).strip().lower().endswith(".jsonl"):
+        # Default/no-explicit-file case: structured data, not a fake
+        # Python source snippet -- see joi_companion/data/memory/README.md.
+        entry = {
+            "kind": "autonomous_edit",
+            "at": datetime.utcnow().isoformat() + "Z",
+            "trigger_source": trigger_source,
+            "insight": insight,
+            "user_hint": user_hint,
+        }
+        try:
+            result = _append_autonomous_note_log(target_file, entry)
+        except Exception as e:
+            def _apply_revert(runtime):
+                runtime["last_edit_at"] = datetime.utcnow().isoformat()
+                runtime["last_result"] = "reverted"
+                runtime["last_error"] = str(e)
+                runtime["failure_count"] = int(runtime.get("failure_count", 0) or 0) + 1
+                runtime["revert_count"] = int(runtime.get("revert_count", 0) or 0) + 1
+            _mutate_code_autonomy_runtime(_apply_revert)
+            return {"success": False, "error": str(e), "relative_path": str(target_file), "reverted": True}
+        def _apply_success(runtime):
+            runtime["last_edit_at"] = datetime.utcnow().isoformat()
+            runtime["last_result"] = "ok"
+            runtime["last_error"] = ""
+            runtime["success_count"] = int(runtime.get("success_count", 0) or 0) + 1
+        _mutate_code_autonomy_runtime(_apply_success)
+        result["success"] = True
+        memory.add_knowledge_batch(
+            json.dumps(entry, ensure_ascii=False),
+            source="aurion_code_autonomy",
+            metadata={
+                "target_file": result.get("relative_path"),
+                "updated_at": result.get("updated_at"),
+                "trigger_source": trigger_source
+            }
+        )
+        return result
+
+    # An explicit repo file was named in the conversation -- keep editing
+    # it as real source via the existing Python-note format, with the
+    # same py_compile/revert safety net as before.
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     target_path = None
     prior_content = None
     prior_exists = False
@@ -18642,10 +18740,6 @@ def _autonomous_code_edit_tick(user_text="", response="", force=False, trigger_s
         f"\n\ndef aurion_autonomous_note_{stamp}():\n"
         f"    \"\"\"Autonomous update generated at {datetime.utcnow().isoformat()} UTC via {trigger_source}.\"\"\"\n"
         f"    return {{\"insight\": {json.dumps(insight)}, \"user_hint\": {json.dumps(user_hint)}, \"source\": {json.dumps(trigger_source)}}}\n"
-    )
-    _update_code_autonomy_runtime(
-        last_attempt_at=datetime.utcnow().isoformat(),
-        last_target_file=str(target_file),
     )
     try:
         result = _apply_repo_code_edit(
@@ -25612,7 +25706,7 @@ HTML_TEMPLATE = """
                     </div>
                     <div class="setting-group">
                         <label class="setting-label" style="min-width: 140px;">Target file</label>
-                        <input id="codeAutonomyPathInput" class="profile-input" type="text" placeholder="joi_companion\\aurion_runtime\\aurion_self_edits.py" />
+                        <input id="codeAutonomyPathInput" class="profile-input" type="text" placeholder="joi_companion\\data\\memory\\aurion_notes.jsonl" />
                     </div>
                     <div class="setting-group">
                         <label class="setting-label" style="min-width: 140px;">Edit note</label>

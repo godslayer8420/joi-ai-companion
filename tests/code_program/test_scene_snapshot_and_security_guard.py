@@ -11,6 +11,7 @@ cost once. AURION_TESTING=1 (set in conftest.py before this import) keeps
 the always-on autonomy/background threads from starting during that import.
 """
 from datetime import datetime
+import json
 
 import pytest
 
@@ -625,4 +626,136 @@ def test_vision_oscillate_route_locks_deep_learning_without_clobbering():
     assert "Oscillation sweep" in deep["discoveries"][0]["text"]
     # Unrelated field must survive the merge-write.
     assert deep["focus"] == "keep-me"
+
+
+# ---------------------------------------------------------------------------
+# aurion_notes.jsonl: replaces the old design where Aurion's default
+# self-edit/auto-tick continuity notes were appended as executable-looking
+# Python functions to joi_companion/aurion_runtime/aurion_self_edits.py (a
+# file that grew unbounded and was never actually imported/executed as
+# code). See joi_companion/data/memory/README.md.
+# ---------------------------------------------------------------------------
+
+def test_resolve_code_autonomy_target_defaults_to_dedicated_memory_folder():
+    target = web_ui._resolve_code_autonomy_target()
+    assert target.strip().lower().endswith(".jsonl")
+    assert "data" in target.lower() and "memory" in target.lower()
+
+
+def test_append_autonomous_note_log_writes_valid_jsonl(tmp_path):
+    rel_path = "joi_companion/data/memory/_test_notes.jsonl"
+    abs_path = web_ui._repo_root_path() / rel_path
+    try:
+        result = web_ui._append_autonomous_note_log(rel_path, {"kind": "test", "value": 1})
+        assert result["entry_count"] == 1
+        result = web_ui._append_autonomous_note_log(rel_path, {"kind": "test", "value": 2})
+        assert result["entry_count"] == 2
+        lines = abs_path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 2
+        parsed = [json.loads(ln) for ln in lines]
+        assert parsed[0]["value"] == 1
+        assert parsed[1]["value"] == 2
+    finally:
+        if abs_path.exists():
+            abs_path.unlink()
+
+
+def test_append_autonomous_note_log_rotates_oldest_entries(tmp_path):
+    rel_path = "joi_companion/data/memory/_test_notes_rotation.jsonl"
+    abs_path = web_ui._repo_root_path() / rel_path
+    try:
+        for i in range(5):
+            web_ui._append_autonomous_note_log(rel_path, {"i": i}, max_entries=3)
+        lines = abs_path.read_text(encoding="utf-8").strip().splitlines()
+        parsed = [json.loads(ln) for ln in lines]
+        assert len(parsed) == 3
+        assert [p["i"] for p in parsed] == [2, 3, 4]
+    finally:
+        if abs_path.exists():
+            abs_path.unlink()
+
+
+def test_write_autonomous_self_fix_note_uses_jsonl_log_by_default():
+    rel_path = web_ui._resolve_code_autonomy_target()
+    abs_path = web_ui._repo_root_path() / rel_path
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["code_autonomy"] = {}
+        web_ui.app_state["code_autonomy_runtime"] = {"unrelated_marker": "keep-me"}
+    original_content = abs_path.read_text(encoding="utf-8") if abs_path.exists() else None
+    try:
+        result = web_ui._write_autonomous_self_fix_note(
+            user_text="please fix the broken thing", response="Investigating now.", trigger_source="chat",
+        )
+        assert result["relative_path"].replace("\\", "/") == rel_path.replace("\\", "/")
+        lines = abs_path.read_text(encoding="utf-8").strip().splitlines()
+        last_entry = json.loads(lines[-1])
+        assert last_entry["kind"] == "self_fix"
+        assert last_entry["issue"] == "please fix the broken thing"
+        # No stray Python-function text was ever written.
+        assert "def aurion_self_fix_note_" not in abs_path.read_text(encoding="utf-8")
+        runtime = web_ui.app_state["code_autonomy_runtime"]
+        assert runtime["last_result"] == "self_fix_ok"
+        # Unrelated field must survive the merge-write.
+        assert runtime["unrelated_marker"] == "keep-me"
+    finally:
+        if original_content is None:
+            if abs_path.exists():
+                abs_path.unlink()
+        else:
+            abs_path.write_text(original_content, encoding="utf-8")
+
+
+def test_autonomous_code_edit_tick_uses_jsonl_log_by_default():
+    rel_path = web_ui._resolve_code_autonomy_target()
+    abs_path = web_ui._repo_root_path() / rel_path
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["code_autonomy"] = {}
+        web_ui.app_state["code_autonomy_runtime"] = {"unrelated_marker": "keep-me"}
+    original_content = abs_path.read_text(encoding="utf-8") if abs_path.exists() else None
+    try:
+        result = web_ui._autonomous_code_edit_tick(
+            user_text="just chatting, nothing special", response="A steady, ordinary reply.",
+            force=True, trigger_source="auto_tick",
+        )
+        assert result["success"] is True
+        lines = abs_path.read_text(encoding="utf-8").strip().splitlines()
+        last_entry = json.loads(lines[-1])
+        assert last_entry["kind"] == "autonomous_edit"
+        assert last_entry["trigger_source"] == "auto_tick"
+        assert "def aurion_autonomous_note_" not in abs_path.read_text(encoding="utf-8")
+        runtime = web_ui.app_state["code_autonomy_runtime"]
+        assert runtime["last_result"] == "ok"
+        assert runtime["success_count"] == 1
+        # Unrelated field must survive the merge-write.
+        assert runtime["unrelated_marker"] == "keep-me"
+    finally:
+        if original_content is None:
+            if abs_path.exists():
+                abs_path.unlink()
+        else:
+            abs_path.write_text(original_content, encoding="utf-8")
+
+
+def test_autonomous_code_edit_tick_still_edits_an_explicitly_named_real_file():
+    # When the user names a real, existing repo file, the tick should still
+    # edit it as source (Python-note format), not redirect to the JSONL log.
+    rel_path = "joi_companion/data/memory/_test_explicit_target.py"
+    abs_path = web_ui._repo_root_path() / rel_path
+    abs_path.write_text("# scratch file for a code-program test\n", encoding="utf-8")
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["code_autonomy"] = {}
+        web_ui.app_state["code_autonomy_runtime"] = {}
+    try:
+        result = web_ui._autonomous_code_edit_tick(
+            user_text=f"please look at {rel_path} and fix a bug",
+            response=f"Sure, checking {rel_path} now.",
+            force=True, trigger_source="chat",
+        )
+        assert result["success"] is True
+        assert result["relative_path"].replace("\\", "/") == rel_path
+        content = abs_path.read_text(encoding="utf-8")
+        assert "def aurion_autonomous_note_" in content
+    finally:
+        if abs_path.exists():
+            abs_path.unlink()
 
