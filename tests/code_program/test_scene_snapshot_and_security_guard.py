@@ -57,6 +57,53 @@ def test_resolve_repo_scoped_path_allows_ordinary_repo_file():
 
 
 # ---------------------------------------------------------------------------
+# Observability: /healthz + structured logging setup.
+# ---------------------------------------------------------------------------
+
+def test_healthz_endpoint_reports_security_and_runtime_posture():
+    client = web_ui.app.test_client()
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["status"] == "ok"
+    assert payload["runtime"]["autonomy_threads_enabled"] is False
+    assert payload["runtime"]["test_run"] is True
+    assert payload["security"]["code_exec_enabled"] is False
+    assert payload["security"]["self_edit_enabled"] is False
+    assert payload["security"]["code_editor_enabled"] is False
+    assert "failure_count" in payload["code_autonomy"]
+    assert "ffmpeg_available" in payload["codec"]
+    assert set(payload["llm_providers_configured"].keys()) == {
+        "openai", "anthropic", "cohere", "openrouter", "groq", "ollama_cloud",
+    }
+
+
+def test_healthz_is_rate_limit_exempt():
+    assert "/healthz" in web_ui._RATE_LIMIT_EXEMPT_PATHS
+
+
+def test_structured_logger_uses_json_formatter():
+    assert web_ui.logger.name == "aurion"
+    assert len(web_ui.logger.handlers) >= 1
+    formatter = web_ui.logger.handlers[0].formatter
+    assert isinstance(formatter, web_ui._JsonLogFormatter)
+
+
+def test_json_log_formatter_produces_parseable_json():
+    import json as _json
+    import logging as _logging
+    record = _logging.LogRecord(
+        name="aurion.test", level=_logging.WARNING, pathname=__file__, lineno=1,
+        msg="blocked %s", args=("thing",), exc_info=None,
+    )
+    line = web_ui._JsonLogFormatter().format(record)
+    parsed = _json.loads(line)
+    assert parsed["level"] == "WARNING"
+    assert parsed["message"] == "blocked thing"
+    assert parsed["logger"] == "aurion.test"
+
+
+# ---------------------------------------------------------------------------
 # scene_snapshot / world_context path (feeds the autonomy tick and
 # /api/message with a trimmed, size-capped view of client-reported state).
 # ---------------------------------------------------------------------------

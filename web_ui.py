@@ -33,6 +33,7 @@ import warnings
 import xml.etree.ElementTree as ET
 import uuid
 import zipfile
+import logging
 from urllib.parse import quote, urlparse, parse_qs, urlencode, urlunparse
 
 # Load environment variables from .env file
@@ -43,6 +44,38 @@ def _env_bool(name, default=False):
     if value is None:
         return default
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+class _JsonLogFormatter(logging.Formatter):
+    """Structured (one-JSON-object-per-line) log formatter.
+
+    Kept intentionally simple (stdlib logging only, no new dependency) so
+    log lines are easy to grep/ingest without pulling in a logging
+    framework. Applies to the "aurion" logger only -- this does not touch
+    the print()-based logging used throughout most of the rest of this
+    file, which is a much larger follow-up (see session todos).
+    """
+    def format(self, record):
+        payload = {
+            "time": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        try:
+            return json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            return f"{payload['time']} {payload['level']} {payload['logger']} {payload['message']}"
+
+_LOG_LEVEL_NAME = str(os.getenv("AURION_LOG_LEVEL", os.getenv("LOG_LEVEL", "INFO")) or "INFO").strip().upper()
+logger = logging.getLogger("aurion")
+logger.setLevel(getattr(logging, _LOG_LEVEL_NAME, logging.INFO))
+if not logger.handlers:
+    _log_handler = logging.StreamHandler()
+    _log_handler.setFormatter(_JsonLogFormatter())
+    logger.addHandler(_log_handler)
+    logger.propagate = False
 
 def _hydrate_env_from_downloads():
     """Load optional key files from Downloads so standalone builds self-configure."""
@@ -954,6 +987,7 @@ _RATE_LIMIT_EXEMPT_PATHS = {
     "/api/status",
     "/api/proactive/next",
     "/api/world-audio/perception",
+    "/healthz",
 }
 _RATE_BUCKETS = {}
 _RATE_LOCK = threading.Lock()
@@ -994,6 +1028,15 @@ if _TRUST_PROXY:
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=_TRUST_PROXY_FOR, x_proto=_TRUST_PROXY_FOR, x_host=_TRUST_PROXY_FOR)
 app.config['SESSION_COOKIE_SECURE'] = bool(_REQUIRE_TLS_REMOTE or _REQUIRE_TLS_LOCAL or _TLS_MODE != "off")
 app.config['PREFERRED_URL_SCHEME'] = "https" if _TLS_MODE != "off" or _REQUIRE_TLS_REMOTE or _REQUIRE_TLS_LOCAL else "http"
+
+logger.info(
+    "Security posture at startup: remote_access=%s bind_host=%s tls_mode=%s "
+    "code_exec_enabled=%s self_edit_enabled=%s code_editor_enabled=%s "
+    "autonomy_threads_enabled=%s test_run=%s",
+    _ALLOW_REMOTE, _BIND_HOST, _TLS_MODE,
+    _ALLOW_CODE_EXEC, _ALLOW_SELF_EDIT, _ALLOW_CODE_EDITOR,
+    _ENABLE_AUTONOMY_THREADS, _IS_TEST_RUN,
+)
 
 _REMOTE_SECURITY_READY = (not _ALLOW_REMOTE) or (
     bool(_API_KEY)
@@ -1129,6 +1172,68 @@ def _probe_codec_support(browser_caps=None):
         "recommended_install": "winget install --id Gyan.FFmpeg -e" if os.name == "nt" else "Install ffmpeg via your package manager",
         "last_checked_at": datetime.utcnow().isoformat()
     }
+
+@app.route('/healthz', methods=['GET'])
+def healthz():
+    """Lightweight liveness/readiness endpoint for ops/monitoring.
+
+    Deliberately avoids heavy work (LLM calls, memory scans, self-repair)
+    that /api/status does -- safe to poll frequently by an external
+    monitor or load balancer. Reports the security posture (which
+    RCE-adjacent surfaces are enabled) and autonomy/runtime health signals
+    introduced/hardened this session, not full application state.
+    """
+    try:
+        codec = _probe_codec_support()
+    except Exception as e:
+        codec = {"error": str(e)}
+
+    try:
+        code_autonomy_runtime = dict(app_state.get("code_autonomy_runtime") or {})
+    except Exception:
+        code_autonomy_runtime = {}
+
+    try:
+        vision_breaker_open = time.time() < _VISION_CB_UNTIL
+    except Exception:
+        vision_breaker_open = False
+
+    providers_configured = {
+        "openai": bool(os.getenv("OPENAI_API_KEY")),
+        "anthropic": bool(os.getenv("ANTHROPIC_API_KEY")),
+        "cohere": bool(os.getenv("COHERE_API_KEY")),
+        "openrouter": bool(os.getenv("OPENROUTER_API_KEY")),
+        "groq": bool(os.getenv("GROQ_API_KEY")),
+        "ollama_cloud": bool(os.getenv("OLLAMA_API_KEY")),
+    }
+
+    payload = {
+        "status": "ok",
+        "time": datetime.utcnow().isoformat() + "Z",
+        "runtime": {
+            "autonomy_threads_enabled": bool(_ENABLE_AUTONOMY_THREADS),
+            "test_run": bool(_IS_TEST_RUN),
+        },
+        "code_autonomy": {
+            "last_tick_at": code_autonomy_runtime.get("last_tick_at"),
+            "last_result": code_autonomy_runtime.get("last_result"),
+            "failure_count": int(code_autonomy_runtime.get("failure_count", 0) or 0),
+            "success_count": int(code_autonomy_runtime.get("success_count", 0) or 0),
+        },
+        "vision_circuit_breaker_open": vision_breaker_open,
+        "codec": {
+            "ffmpeg_available": bool(codec.get("ffmpeg_available", False)),
+            "ffprobe_available": bool(codec.get("ffprobe_available", False)),
+        },
+        "llm_providers_configured": providers_configured,
+        "security": {
+            "remote_access_allowed": bool(_ALLOW_REMOTE),
+            "code_exec_enabled": bool(_ALLOW_CODE_EXEC),
+            "self_edit_enabled": bool(_ALLOW_SELF_EDIT),
+            "code_editor_enabled": bool(_ALLOW_CODE_EDITOR),
+        },
+    }
+    return jsonify(payload)
 
 def _ensure_codec_support(allow_install=False):
     status = _probe_codec_support(app_state.get("codec_support", {}).get("browser_capabilities", {}))
@@ -50485,6 +50590,7 @@ def aurion_exec_route():
     Body: {code_b64: str, description: str}
     """
     if not _ALLOW_CODE_EXEC:
+        logger.warning("Blocked /api/aurion/exec: code exec disabled (remote_addr=%s)", request.remote_addr)
         return jsonify({"success": False, "error": "Code execution is disabled. Set AURION_ENABLE_CODE_EXEC=1 to opt in."}), 403
     guard = _require_local_privileged_access()
     if guard is not None:
@@ -58304,6 +58410,7 @@ def update_unreal_toolchain_state():
 @app.route('/api/code/read', methods=['POST'])
 def code_read():
     if not _ALLOW_SELF_EDIT:
+        logger.warning("Blocked /api/code/read: self-edit disabled (remote_addr=%s)", request.remote_addr)
         return jsonify({"success": False, "error": "Self-editing is disabled. Set AURION_ENABLE_SELF_EDIT=1 to opt in."}), 403
     guard = _require_local_privileged_access()
     if guard is not None:
@@ -58336,6 +58443,7 @@ def code_read():
 @app.route('/api/code/edit', methods=['POST'])
 def code_edit():
     if not _ALLOW_SELF_EDIT:
+        logger.warning("Blocked /api/code/edit: self-edit disabled (remote_addr=%s)", request.remote_addr)
         return jsonify({"success": False, "error": "Self-editing is disabled. Set AURION_ENABLE_SELF_EDIT=1 to opt in."}), 403
     guard = _require_local_privileged_access()
     if guard is not None:
@@ -59171,6 +59279,7 @@ def _code_editor_resolve(filename):
 @app.route('/api/code/read', methods=['GET'])
 def code_editor_read():
     if not _ALLOW_CODE_EDITOR:
+        logger.warning("Blocked GET /api/code/read (editor): code editor disabled (remote_addr=%s)", request.remote_addr)
         return jsonify({"success": False, "error": "Code editor is disabled. Set AURION_ENABLE_CODE_EDITOR=1 to opt in."}), 403
     guard = _require_local_privileged_access()
     if guard is not None:
@@ -59188,6 +59297,7 @@ def code_editor_read():
 @app.route('/api/code/write', methods=['POST'])
 def code_write():
     if not _ALLOW_CODE_EDITOR:
+        logger.warning("Blocked /api/code/write: code editor disabled (remote_addr=%s)", request.remote_addr)
         return jsonify({"success": False, "error": "Code editor is disabled. Set AURION_ENABLE_CODE_EDITOR=1 to opt in."}), 403
     guard = _require_local_privileged_access()
     if guard is not None:
