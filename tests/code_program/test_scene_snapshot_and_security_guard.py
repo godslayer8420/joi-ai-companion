@@ -139,6 +139,19 @@ def test_serialize_scene_snapshot_text_empty_for_falsy_input():
 # must not clobber unrelated fields already present.
 # ---------------------------------------------------------------------------
 
+def test_mutate_code_autonomy_runtime_increments_counter_atomically():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["code_autonomy_runtime"] = {"success_count": 2, "keep_me": "yes"}
+
+    def _bump(runtime):
+        runtime["success_count"] = int(runtime.get("success_count", 0) or 0) + 1
+
+    result = web_ui._mutate_code_autonomy_runtime(_bump)
+    assert result["success_count"] == 3
+    assert result["keep_me"] == "yes"
+    assert web_ui.app_state["code_autonomy_runtime"] == result
+
+
 def test_update_code_autonomy_runtime_merges_without_clobbering():
     with web_ui._APP_STATE_LOCK:
         web_ui.app_state["code_autonomy_runtime"] = {"existing_field": "keep-me"}

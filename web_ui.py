@@ -18297,12 +18297,12 @@ def _write_autonomous_self_fix_note(user_text="", response="", trigger_source="c
         mode=cfg.get("mode", "append"),
         create_if_missing=True
     )
-    runtime = dict(app_state.get("code_autonomy_runtime") or {})
-    runtime["last_self_fix_at"] = datetime.utcnow().isoformat()
-    runtime["last_self_fix_target"] = str(result.get("relative_path") or target_file)
-    runtime["last_self_fix_result"] = "ok"
-    runtime["last_result"] = "self_fix_ok"
-    app_state["code_autonomy_runtime"] = runtime
+    runtime = _update_code_autonomy_runtime(
+        last_self_fix_at=datetime.utcnow().isoformat(),
+        last_self_fix_target=str(result.get("relative_path") or target_file),
+        last_self_fix_result="ok",
+        last_result="self_fix_ok",
+    )
     return result
 
 def _coding_knowledge_seed_text():
@@ -18327,10 +18327,11 @@ def _register_coding_knowledge_memory(force=False):
         source="aurion_coding_knowledge",
         metadata={"digest": digest, "registered_at": datetime.utcnow().isoformat()}
     )
-    runtime["coding_knowledge_seed_digest"] = digest
-    runtime["coding_knowledge_registered_at"] = datetime.utcnow().isoformat()
-    runtime["coding_knowledge_chunk_count"] = len(doc_ids)
-    app_state["code_autonomy_runtime"] = runtime
+    _update_code_autonomy_runtime(
+        coding_knowledge_seed_digest=digest,
+        coding_knowledge_registered_at=datetime.utcnow().isoformat(),
+        coding_knowledge_chunk_count=len(doc_ids),
+    )
     return {"registered": True, "chunk_count": len(doc_ids), "digest": digest}
 
 def _build_coding_knowledge_context(query="", max_chars=2200):
@@ -18385,10 +18386,10 @@ def _autonomous_code_edit_tick(user_text="", response="", force=False, trigger_s
         f"    \"\"\"Autonomous update generated at {datetime.utcnow().isoformat()} UTC via {trigger_source}.\"\"\"\n"
         f"    return {{\"insight\": {json.dumps(insight)}, \"user_hint\": {json.dumps(user_hint)}, \"source\": {json.dumps(trigger_source)}}}\n"
     )
-    runtime = dict(app_state.get("code_autonomy_runtime", {}) or {})
-    runtime["last_attempt_at"] = datetime.utcnow().isoformat()
-    runtime["last_target_file"] = str(target_file)
-    app_state["code_autonomy_runtime"] = runtime
+    _update_code_autonomy_runtime(
+        last_attempt_at=datetime.utcnow().isoformat(),
+        last_target_file=str(target_file),
+    )
     try:
         result = _apply_repo_code_edit(
             target_file,
@@ -18407,20 +18408,20 @@ def _autonomous_code_edit_tick(user_text="", response="", force=False, trigger_s
                     target_path.unlink()
             except Exception:
                 pass
-        runtime = dict(app_state.get("code_autonomy_runtime", {}) or {})
-        runtime["last_edit_at"] = datetime.utcnow().isoformat()
-        runtime["last_result"] = "reverted"
-        runtime["last_error"] = str(e)
-        runtime["failure_count"] = int(runtime.get("failure_count", 0) or 0) + 1
-        runtime["revert_count"] = int(runtime.get("revert_count", 0) or 0) + 1
-        app_state["code_autonomy_runtime"] = runtime
+        def _apply_revert(runtime):
+            runtime["last_edit_at"] = datetime.utcnow().isoformat()
+            runtime["last_result"] = "reverted"
+            runtime["last_error"] = str(e)
+            runtime["failure_count"] = int(runtime.get("failure_count", 0) or 0) + 1
+            runtime["revert_count"] = int(runtime.get("revert_count", 0) or 0) + 1
+        _mutate_code_autonomy_runtime(_apply_revert)
         return {"success": False, "error": str(e), "relative_path": str(target_file), "reverted": True}
-    runtime = dict(app_state.get("code_autonomy_runtime", {}) or {})
-    runtime["last_edit_at"] = datetime.utcnow().isoformat()
-    runtime["last_result"] = "ok"
-    runtime["last_error"] = ""
-    runtime["success_count"] = int(runtime.get("success_count", 0) or 0) + 1
-    app_state["code_autonomy_runtime"] = runtime
+    def _apply_success(runtime):
+        runtime["last_edit_at"] = datetime.utcnow().isoformat()
+        runtime["last_result"] = "ok"
+        runtime["last_error"] = ""
+        runtime["success_count"] = int(runtime.get("success_count", 0) or 0) + 1
+    _mutate_code_autonomy_runtime(_apply_success)
     result["success"] = True
     memory.add_knowledge_batch(
         snippet,
@@ -19318,6 +19319,20 @@ def _update_code_autonomy_runtime(**fields):
     with _APP_STATE_LOCK:
         runtime = dict(app_state.get("code_autonomy_runtime", {}) or {})
         runtime.update(fields)
+        app_state["code_autonomy_runtime"] = runtime
+        return runtime
+
+def _mutate_code_autonomy_runtime(mutate_fn):
+    """Thread-safe read-mutate-write of app_state['code_autonomy_runtime'].
+
+    Use this instead of _update_code_autonomy_runtime when the new value
+    depends on the current value (e.g. incrementing a counter) -- mutate_fn
+    receives the current dict and mutates it in place while the lock is
+    held, so the read and the write happen as one atomic step.
+    """
+    with _APP_STATE_LOCK:
+        runtime = dict(app_state.get("code_autonomy_runtime", {}) or {})
+        mutate_fn(runtime)
         app_state["code_autonomy_runtime"] = runtime
         return runtime
 
@@ -58081,11 +58096,11 @@ def register_code_knowledge():
         metadata = data.get("metadata", {})
         if text:
             doc_ids = memory.add_knowledge_batch(text[:200000], source=source, metadata=metadata if isinstance(metadata, dict) else {})
-            runtime = dict(app_state.get("code_autonomy_runtime", {}) or {})
-            runtime["coding_knowledge_registered_at"] = datetime.utcnow().isoformat()
-            runtime["coding_knowledge_chunk_count"] = int(runtime.get("coding_knowledge_chunk_count", 0) or 0) + len(doc_ids)
-            runtime["last_coding_knowledge_source"] = source
-            app_state["code_autonomy_runtime"] = runtime
+            def _apply(runtime):
+                runtime["coding_knowledge_registered_at"] = datetime.utcnow().isoformat()
+                runtime["coding_knowledge_chunk_count"] = int(runtime.get("coding_knowledge_chunk_count", 0) or 0) + len(doc_ids)
+                runtime["last_coding_knowledge_source"] = source
+            _mutate_code_autonomy_runtime(_apply)
             return jsonify({"success": True, "doc_ids": doc_ids, "chunk_count": len(doc_ids), "source": source})
         result = _register_coding_knowledge_memory(force=bool(data.get("force", False)))
         return jsonify({"success": True, **result})
@@ -58101,10 +58116,10 @@ def create_code_downloadable():
         files = data.get("files") or []
         artifact_type = str(data.get("artifact_type", "bundle") or "bundle").strip().lower() or "bundle"
         result = _build_downloadable_artifact(name=name, files=files, artifact_type=artifact_type)
-        runtime = dict(app_state.get("code_autonomy_runtime", {}) or {})
-        runtime["last_downloadable_artifact_at"] = result.get("created_at")
-        runtime["last_downloadable_artifact_name"] = result.get("zip_name")
-        app_state["code_autonomy_runtime"] = runtime
+        _update_code_autonomy_runtime(
+            last_downloadable_artifact_at=result.get("created_at"),
+            last_downloadable_artifact_name=result.get("zip_name"),
+        )
         release_state = _resolve_release_packaging_state()
         release_state["last_release_artifact_at"] = result.get("created_at")
         release_state["last_release_artifact_name"] = result.get("zip_name")
@@ -58786,9 +58801,7 @@ def handle_message():
         try:
             code_edit_result = _autonomous_code_edit_tick(user_text=user_text, response=response)
         except Exception as e:
-            runtime = dict(app_state.get("code_autonomy_runtime", {}) or {})
-            runtime["last_result"] = f"error:{e}"
-            app_state["code_autonomy_runtime"] = runtime
+            _update_code_autonomy_runtime(last_result=f"error:{e}")
             print(f"[Code Autonomy Error] {e}")
         self_fix_result = None
         try:
@@ -58799,10 +58812,10 @@ def handle_message():
                     trigger_source="chat"
                 )
         except Exception as e:
-            runtime = dict(app_state.get("code_autonomy_runtime", {}) or {})
-            runtime["last_self_fix_result"] = f"error:{e}"
-            runtime["last_self_fix_error"] = str(e)
-            app_state["code_autonomy_runtime"] = runtime
+            _update_code_autonomy_runtime(
+                last_self_fix_result=f"error:{e}",
+                last_self_fix_error=str(e),
+            )
             print(f"[Self Fix Autonomy Error] {e}")
         if translation_phrase and translation_phrase not in response:
             response = f"{response}\n\n{translation_phrase}"
