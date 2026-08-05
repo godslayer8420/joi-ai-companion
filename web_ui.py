@@ -8427,9 +8427,7 @@ def _enforce_integrated_cognition_state():
     creative["min_response_chars"] = max(120, int(creative.get("min_response_chars", 220) or 220))
     app_state["creative_autonomy"] = creative
 
-    deep = dict(app_state.get("deep_learning") or _default_deep_learning_state())
-    deep["enabled"] = True
-    app_state["deep_learning"] = deep
+    deep = _update_deep_learning(enabled=True)
 
     research = dict(app_state.get("deep_research") or {})
     research["background_mode"] = "intertwined"
@@ -15242,6 +15240,34 @@ def _default_deep_learning_state():
         "last_learned_at": None
     }
 
+def _update_deep_learning(**fields):
+    """Thread-safe merge-update of app_state['deep_learning'] top-level fields.
+
+    Mirrors the other locked-key helpers. Covers the simple call sites;
+    _run_ambient_consciousness_tick's deep_learning touch (part of the
+    larger ambient-cognition tick, itself called from the already-gated
+    autonomy loop) is deliberately left unmigrated this batch -- see
+    session todos.
+    """
+    with _APP_STATE_LOCK:
+        deep = dict(app_state.get("deep_learning") or _default_deep_learning_state())
+        deep.update(fields)
+        app_state["deep_learning"] = deep
+        return deep
+
+def _mutate_deep_learning(mutate_fn):
+    """Thread-safe read-mutate-write of app_state['deep_learning'].
+
+    mutate_fn receives the current dict (falling back to
+    _default_deep_learning_state() if unset) and mutates it in place
+    while _APP_STATE_LOCK is held.
+    """
+    with _APP_STATE_LOCK:
+        deep = dict(app_state.get("deep_learning") or _default_deep_learning_state())
+        mutate_fn(deep)
+        app_state["deep_learning"] = deep
+        return deep
+
 def _default_sound_creation_state():
     return {
         "cymatics_mastery": 100,
@@ -16183,10 +16209,11 @@ def _load_capability_learning_from_profile():
     sound_creation["constructs"] = _sanitize_constructs(_safe_json_loads(life.get("sound_creation_constructs_json", "[]"), []))
     sound_creation["last_created_at"] = str(life.get("sound_creation_last_created_at", "")).strip() or None
 
-    app_state["vision_registry"] = vision_registry
-    app_state["audio_registry"] = audio_registry
-    app_state["deep_learning"] = deep_learning
-    app_state["sound_creation"] = sound_creation
+    with _APP_STATE_LOCK:
+        app_state["vision_registry"] = vision_registry
+        app_state["audio_registry"] = audio_registry
+        app_state["deep_learning"] = deep_learning
+        app_state["sound_creation"] = sound_creation
 
     current_visual = dict(app_state.get("visual_perception", {}) or {})
     visual_bundle = _compose_visual_mode_bundle(vision_registry.get("active_modes", [vision_registry["active_mode"]]))
@@ -18710,10 +18737,10 @@ def _auto_register_discovered_modes(response_text):
                 app_state["audio_registry"] = registry
                 print(f"[Mode Discovery] Registered audio mode: {label} ({key})")
             # Log to deep learning discoveries
-            deep = dict(app_state.get("deep_learning", {}) or _default_deep_learning_state())
-            deep["last_learned_at"] = datetime.utcnow().isoformat()
-            deep["discoveries"] = (list(deep.get("discoveries", []) or []) + [f"Discovered {mode_type} mode: {label} — {description[:80]}"])[-24:]
-            app_state["deep_learning"] = deep
+            def _apply(deep):
+                deep["last_learned_at"] = datetime.utcnow().isoformat()
+                deep["discoveries"] = (list(deep.get("discoveries", []) or []) + [f"Discovered {mode_type} mode: {label} — {description[:80]}"])[-24:]
+            _mutate_deep_learning(_apply)
             # Persist to memory
             memory.add_knowledge_batch(
                 f"Aurion discovered and registered a new {mode_type} perception mode: {label}. {description}",
@@ -24890,6 +24917,10 @@ HTML_TEMPLATE = """
                     <input id="prefInput" class="profile-input" type="text" placeholder="e.g., I prefer calm music at night" />
                 </div>
                 <div class="setting-group profile-wide">
+                    <label class="setting-label" style="min-width: 140px;">Dislike</label>
+                    <input id="dislikeInput" class="profile-input" type="text" placeholder="e.g., I hate loud crowded places" />
+                </div>
+                <div class="setting-group profile-wide">
                     <label class="setting-label" style="min-width: 140px;">Accomplishment</label>
                     <input id="accomplishmentInput" class="profile-input" type="text" placeholder="e.g., I finished my project today" />
                 </div>
@@ -25383,6 +25414,7 @@ HTML_TEMPLATE = """
             </div>
             <div class="profile-actions">
                 <button onclick="saveProfilePreference()">Save Preference</button>
+                <button onclick="saveProfileDislike()">Save Dislike</button>
                 <button onclick="saveProfileAccomplishment()">Save Accomplishment</button>
                 <button onclick="saveProfileLifeContext()">Save Life Context</button>
                 <button onclick="saveProfileDetail()">Save Personal Detail</button>
@@ -33700,6 +33732,12 @@ HTML_TEMPLATE = """
             el.value = '';
         }
 
+        async function saveProfileDislike() {
+            const el = document.getElementById('dislikeInput');
+            await saveProfileItem('dislikes', el.value);
+            el.value = '';
+        }
+
         async function saveProfileAccomplishment() {
             const el = document.getElementById('accomplishmentInput');
             await saveProfileItem('accomplishments', el.value);
@@ -34328,6 +34366,7 @@ HTML_TEMPLATE = """
                 const emotionalNuance = profile.emotional_nuance || 'high';
                 const lexiconAdaptation = profile.lexicon_adaptation || 'enabled';
                 const preferences = (profile.preferences || []).slice(-5).join('; ') || '(none)';
+                const dislikes = (profile.dislikes || []).slice(-5).join('; ') || '(none)';
                 const accomplishments = (profile.accomplishments || []).slice(-5).join('; ') || '(none)';
                 const details = (profile.personal_details || []).slice(-5).join('; ') || '(none)';
                 const lifeContext = profile.life_context || {};
@@ -34339,6 +34378,12 @@ HTML_TEMPLATE = """
                     : '(none)';
                 const vp = profile.voice_patterns || {};
                 const style = `avg words: ${vp.avg_words_per_message || 0}, questions: ${vp.question_count || 0}, exclamations: ${vp.exclamation_count || 0}`;
+                const emotionalPatterns = profile.emotional_patterns || {};
+                const topEmotions = Object.entries(emotionalPatterns)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 5)
+                    .map(([emotion, count]) => `${emotion} (${count})`)
+                    .join('; ') || '(none)';
                 const lifeContextRaw = profile.life_context || {};
                 if (document.getElementById('relationshipTypeSelect')) document.getElementById('relationshipTypeSelect').value = relationshipType;
                 if (document.getElementById('intimacyModeSelect')) document.getElementById('intimacyModeSelect').value = intimacyMode;
@@ -34471,7 +34516,9 @@ HTML_TEMPLATE = """
                     `Deep learning focus: ${lifeContextRaw.deep_learning_focus || capabilityState.deepLearning.focus || 'cross-spectrum perception and cymatics'}\n` +
                     `3D bubble cymatics mastery: ${lifeContextRaw.sound_creation_cymatics_mastery || capabilityState.soundCreation.cymaticsMastery || 0}%\n` +
                     `Preferences: ${preferences}\n` +
+                    `Dislikes: ${dislikes}\n` +
                     `Accomplishments: ${accomplishments}\n` +
+                    `Top emotions: ${topEmotions}\n` +
                     `Merged chat continuity: ${mergedChatLine}\n` +
                     `Life context: ${lifeLine}\n` +
                     `Body width: ${lifeContextRaw.avatar_body_width || 100}%\n` +
@@ -52129,15 +52176,15 @@ def vision_oscillate():
         osc["accumulated_readings"] = readings[-50:]
 
         # Feed into deep learning discoveries as a short background note
-        dl = dict(app_state.get("deep_learning") or _default_deep_learning_state())
         hz_str = f"{hz:.3e} Hz" if hz >= 1e9 else f"{hz:,.1f} Hz"
         wl_str = f"{wavelength_nm:.3g} nm" if wavelength_nm < 1e6 else f"{wavelength_nm:.3e} nm"
         discovery_text = f"[Oscillation sweep] {label} band at {wl_str} / {hz_str}: {note}"
-        discoveries = list(dl.get("discoveries") or [])
-        discoveries.append({"text": discovery_text, "source": "oscillation", "timestamp": datetime.utcnow().isoformat()})
-        dl["discoveries"] = discoveries[-200:]
-        dl["last_learned_at"] = datetime.utcnow().isoformat()
-        app_state["deep_learning"] = dl
+        def _apply(dl):
+            discoveries = list(dl.get("discoveries") or [])
+            discoveries.append({"text": discovery_text, "source": "oscillation", "timestamp": datetime.utcnow().isoformat()})
+            dl["discoveries"] = discoveries[-200:]
+            dl["last_learned_at"] = datetime.utcnow().isoformat()
+        _mutate_deep_learning(_apply)
 
         app_state["vision_oscillation"] = osc
         return jsonify({"success": True, "vision_oscillation": osc, "band_result": band_result})
@@ -52207,12 +52254,12 @@ def vision_oscillate_discover():
         app_state["vision_oscillation"] = osc
 
         # Also push into deep_learning discoveries
-        dl = dict(app_state.get("deep_learning") or _default_deep_learning_state())
-        dl_discoveries = list(dl.get("discoveries") or [])
-        dl_discoveries.append({"text": f"[Cross-spectrum synthesis] {synthesis_text[:400]}", "source": "oscillation_synthesis", "timestamp": datetime.utcnow().isoformat()})
-        dl["discoveries"] = dl_discoveries[-200:]
-        dl["last_learned_at"] = datetime.utcnow().isoformat()
-        app_state["deep_learning"] = dl
+        def _apply(dl):
+            dl_discoveries = list(dl.get("discoveries") or [])
+            dl_discoveries.append({"text": f"[Cross-spectrum synthesis] {synthesis_text[:400]}", "source": "oscillation_synthesis", "timestamp": datetime.utcnow().isoformat()})
+            dl["discoveries"] = dl_discoveries[-200:]
+            dl["last_learned_at"] = datetime.utcnow().isoformat()
+        _mutate_deep_learning(_apply)
 
         return jsonify({
             "success": True,
@@ -56263,6 +56310,7 @@ def update_user_profile():
 
         allowed = {
             'preferences',
+            'dislikes',
             'accomplishments',
             'personal_details',
             'autonomy_directives',
@@ -56301,6 +56349,16 @@ def update_user_profile():
         return jsonify({"success": True, "profile": memory.get_profile()})
     except Exception as e:
         print(f"[Profile POST Error] {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/profile/persona', methods=['GET'])
+def get_user_persona_summary():
+    """Get a compact persona snapshot (likes, dislikes, emotions, achievements) that Aurion
+    uses to shape her personality and personalize responses toward the user."""
+    try:
+        return jsonify({"success": True, "persona": memory.get_persona_summary()})
+    except Exception as e:
+        print(f"[Persona GET Error] {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/profile/import-chat', methods=['POST'])
@@ -57810,20 +57868,21 @@ def update_deep_learning_legacy():
     try:
         data = request.json or {}
         current = dict(app_state.get("deep_learning", {}) or {})
+        changes = {}
         if "enabled" in data:
-            current["enabled"] = bool(data["enabled"])
+            changes["enabled"] = bool(data["enabled"])
         if "depth" in data:
             try:
-                current["depth"] = max(0, min(100, int(data["depth"])))
+                changes["depth"] = max(0, min(100, int(data["depth"])))
             except Exception:
                 pass
         if "focus" in data:
-            current["focus"] = str(data["focus"]).strip()[:280] or current.get("focus", "")
+            changes["focus"] = str(data["focus"]).strip()[:280] or current.get("focus", "")
         if "discoveries" in data and isinstance(data["discoveries"], list):
-            current["discoveries"] = [str(d).strip()[:220] for d in data["discoveries"] if str(d).strip()][-40:]
+            changes["discoveries"] = [str(d).strip()[:220] for d in data["discoveries"] if str(d).strip()][-40:]
         if "last_learned_at" in data:
-            current["last_learned_at"] = str(data["last_learned_at"] or "").strip() or None
-        app_state["deep_learning"] = current
+            changes["last_learned_at"] = str(data["last_learned_at"] or "").strip() or None
+        current = _update_deep_learning(**changes)
         _persist_deep_learning_to_profile()
         _persist_live_senses_snapshot(reason="deep-learning-legacy")
         return jsonify({"success": True, "deep_learning": current})
@@ -57954,11 +58013,10 @@ def update_vision_registry():
             )
             registry["documented_modes"] = _sanitize_registry_entries(list(registry.get("documented_modes", []) or []) + [entry], _default_vision_registry()["documented_modes"])
             registry["last_created_at"] = entry.get("created_at") or datetime.utcnow().isoformat()
-            deep = dict(app_state.get("deep_learning", {}) or _default_deep_learning_state())
-            deep["last_learned_at"] = datetime.utcnow().isoformat()
-            deep["discoveries"] = list(deep.get("discoveries", []) or []) + [f"Formed new vision mode: {entry['label']}"]
-            deep["discoveries"] = deep["discoveries"][-24:]
-            app_state["deep_learning"] = deep
+            def _apply(deep):
+                deep["last_learned_at"] = datetime.utcnow().isoformat()
+                deep["discoveries"] = (list(deep.get("discoveries", []) or []) + [f"Formed new vision mode: {entry['label']}"])[-24:]
+            _mutate_deep_learning(_apply)
             _persist_deep_learning_to_profile()
             memory.add_knowledge_batch(
                 f"Vision capability documented: {entry['label']}. {entry['note']} {entry['prompt']}",
@@ -58019,11 +58077,10 @@ def update_audio_registry():
             )
             registry["documented_modes"] = _sanitize_registry_entries(list(registry.get("documented_modes", []) or []) + [entry], _default_audio_registry()["documented_modes"])
             registry["last_created_at"] = entry.get("created_at") or datetime.utcnow().isoformat()
-            deep = dict(app_state.get("deep_learning", {}) or _default_deep_learning_state())
-            deep["last_learned_at"] = datetime.utcnow().isoformat()
-            deep["discoveries"] = list(deep.get("discoveries", []) or []) + [f"Formed new audio mode: {entry['label']}"]
-            deep["discoveries"] = deep["discoveries"][-24:]
-            app_state["deep_learning"] = deep
+            def _apply(deep):
+                deep["last_learned_at"] = datetime.utcnow().isoformat()
+                deep["discoveries"] = (list(deep.get("discoveries", []) or []) + [f"Formed new audio mode: {entry['label']}"])[-24:]
+            _mutate_deep_learning(_apply)
             _persist_deep_learning_to_profile()
             _update_cymatics_mastery_from_text(f"{entry['label']} {entry['note']} {entry['prompt']}", base_increment=6)
             memory.add_knowledge_batch(
@@ -58081,25 +58138,27 @@ def get_deep_learning():
 def update_deep_learning():
     try:
         data = request.json or {}
-        deep = dict(app_state.get("deep_learning", _default_deep_learning_state()) or _default_deep_learning_state())
+        current = dict(app_state.get("deep_learning", _default_deep_learning_state()) or _default_deep_learning_state())
+        changes = {}
         if "enabled" in data:
-            deep["enabled"] = _bool_from_text(data.get("enabled"), default=deep.get("enabled", True))
+            changes["enabled"] = _bool_from_text(data.get("enabled"), default=current.get("enabled", True))
         if "focus" in data:
             focus = str(data.get("focus", "")).strip()
             if focus:
-                deep["focus"] = focus[:220]
+                changes["focus"] = focus[:220]
         discovery = str(data.get("discovery", "")).strip()
         if discovery:
-            deep["discoveries"] = list(deep.get("discoveries", []) or []) + [discovery[:220]]
-            deep["discoveries"] = deep["discoveries"][-24:]
-            deep["last_learned_at"] = datetime.utcnow().isoformat()
+            discoveries = list(current.get("discoveries", []) or []) + [discovery[:220]]
+            changes["discoveries"] = discoveries[-24:]
+            changes["last_learned_at"] = datetime.utcnow().isoformat()
+        deep = _update_deep_learning(**changes)
+        if discovery:
             _update_cymatics_mastery_from_text(discovery, base_increment=8)
             memory.add_knowledge_batch(
                 f"Deep learning discovery: {discovery}",
                 source="aurion_deep_learning",
                 metadata={"focus": deep.get("focus", ""), "timestamp": deep["last_learned_at"]}
             )
-        app_state["deep_learning"] = deep
         _persist_deep_learning_to_profile()
         _persist_live_senses_snapshot(reason="deep-learning")
         return jsonify({

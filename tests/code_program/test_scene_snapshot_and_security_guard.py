@@ -567,3 +567,62 @@ def test_sync_push_route_requires_gist_and_token():
     assert payload["success"] is False
     assert "gist_id" in payload["error"].lower()
 
+
+# ---------------------------------------------------------------------------
+# deep_learning locking (second next-tier key this batch). The ambient
+# cognition tick's deep_learning touch (part of the larger, already-gated
+# autonomy tick) is deliberately left unmigrated -- see session todos.
+# ---------------------------------------------------------------------------
+
+def test_update_deep_learning_merges_without_clobbering():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["deep_learning"] = {"discoveries": ["old-discovery"], "focus": "keep-me"}
+    result = web_ui._update_deep_learning(enabled=True)
+    assert result["enabled"] is True
+    # Unrelated fields must survive the merge-write.
+    assert result["discoveries"] == ["old-discovery"]
+    assert result["focus"] == "keep-me"
+    assert web_ui.app_state["deep_learning"] == result
+
+
+def test_mutate_deep_learning_preserves_concurrent_fields():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["deep_learning"] = {"focus": "keep-me"}
+
+    def _apply(deep):
+        deep["discoveries"] = list(deep.get("discoveries") or []) + ["new-discovery"]
+
+    result = web_ui._mutate_deep_learning(_apply)
+    assert result["discoveries"] == ["new-discovery"]
+    assert result["focus"] == "keep-me"
+
+
+def test_update_deep_learning_legacy_route_merges_without_clobbering():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["deep_learning"] = {"focus": "keep-me", "discoveries": []}
+    client = web_ui.app.test_client()
+    resp = client.post("/api/deep_learning", json={"enabled": True, "depth": 42})
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["success"] is True
+    assert payload["deep_learning"]["enabled"] is True
+    assert payload["deep_learning"]["depth"] == 42
+    # Unrelated field must survive the merge-write.
+    assert payload["deep_learning"]["focus"] == "keep-me"
+
+
+def test_vision_oscillate_route_locks_deep_learning_without_clobbering():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["deep_learning"] = {"focus": "keep-me", "discoveries": []}
+        web_ui.app_state["vision_oscillation"] = dict(web_ui._default_vision_oscillation_state())
+    client = web_ui.app.test_client()
+    resp = client.post("/api/vision/oscillate", json={"enabled": True})
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["success"] is True
+    deep = web_ui.app_state["deep_learning"]
+    assert len(deep["discoveries"]) == 1
+    assert "Oscillation sweep" in deep["discoveries"][0]["text"]
+    # Unrelated field must survive the merge-write.
+    assert deep["focus"] == "keep-me"
+
