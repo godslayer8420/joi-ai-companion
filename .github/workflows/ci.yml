@@ -1,0 +1,66 @@
+name: Code-program CI
+
+# Scope: the AI-companion runtime track only (web_ui.py, main.py,
+# joi_companion/core/*, joi_companion/aurion_runtime/* imported by it,
+# requirements.txt, packaging). See ARCHITECTURE.md for the code-program
+# vs game-program split. Runs on windows-latest because several pinned
+# dependencies (pywin32, pypiwin32, comtypes) are Windows-only, matching
+# the actual target/dev platform.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Install + smoke import + pytest
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Byte-compile check (fails fast on syntax errors)
+        run: |
+          python -m py_compile web_ui.py main.py run_web_ui.py
+
+      - name: Smoke-import web_ui (must not start autonomy threads)
+        env:
+          AURION_TESTING: "1"
+        run: |
+          python -c "import threading; before = threading.active_count(); import web_ui; after = threading.active_count(); assert web_ui._ENABLE_AUTONOMY_THREADS is False, 'autonomy threads must stay off during import under AURION_TESTING'; assert web_ui._rc_push_thread is None; print(f'threads before={before} after={after}: OK')"
+
+      - name: Run code-program test suite
+        env:
+          AURION_TESTING: "1"
+        run: |
+          python -m pytest tests/code_program -q
