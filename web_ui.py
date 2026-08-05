@@ -16708,6 +16708,22 @@ def _sanitize_sync_settings(raw):
     merged["last_sync_status"] = str(incoming.get("last_sync_status", "idle"))
     return merged
 
+def _update_sync_settings(**fields):
+    """Thread-safe merge-update of app_state['sync_settings'].
+
+    Mirrors _update_code_autonomy_runtime/_update_world_continuity/
+    _update_home_environment_state. Covers the simple, non-network call
+    sites for this key; _sync_now/_auto_sync_if_due (which do real GitHub
+    network I/O and are already serialized by their own _sync_lock) are
+    deliberately left unmigrated this batch as higher-risk/out of scope
+    for a small reviewed batch -- see session todos.
+    """
+    with _APP_STATE_LOCK:
+        settings = _sanitize_sync_settings(app_state.get("sync_settings") or {})
+        settings.update(fields)
+        app_state["sync_settings"] = settings
+        return settings
+
 def _load_sync_settings_from_profile():
     profile = _safe_get_profile()
     life = dict(profile.get("life_context", {}) or {})
@@ -16724,7 +16740,8 @@ def _load_sync_settings_from_profile():
         "last_remote_pushed_at": str(life.get("sync_last_remote_pushed_at", "")).strip() or None,
         "last_conflict": str(life.get("sync_last_conflict", "")).strip()
     }
-    app_state["sync_settings"] = _sanitize_sync_settings(loaded)
+    with _APP_STATE_LOCK:
+        app_state["sync_settings"] = _sanitize_sync_settings(loaded)
 
 def _load_creative_autonomy_from_profile():
     profile = _safe_get_profile()
@@ -55018,27 +55035,27 @@ def update_sync_settings():
     try:
         data = request.json or {}
         current = _sanitize_sync_settings(app_state.get("sync_settings", {}))
-        merged = dict(current)
+        changes = {}
         if "enabled" in data:
-            merged["enabled"] = _bool_from_text(data.get("enabled"), default=current.get("enabled", False))
+            changes["enabled"] = _bool_from_text(data.get("enabled"), default=current.get("enabled", False))
         if "gist_id" in data:
-            merged["gist_id"] = str(data.get("gist_id", "")).strip()
+            changes["gist_id"] = str(data.get("gist_id", "")).strip()
         if "device_id" in data:
-            merged["device_id"] = str(data.get("device_id", "aurion-device")).strip() or "aurion-device"
+            changes["device_id"] = str(data.get("device_id", "aurion-device")).strip() or "aurion-device"
         if "auto_interval_seconds" in data:
             try:
-                merged["auto_interval_seconds"] = max(0, min(3600, int(data.get("auto_interval_seconds", 0))))
+                changes["auto_interval_seconds"] = max(0, min(3600, int(data.get("auto_interval_seconds", 0))))
             except Exception:
-                merged["auto_interval_seconds"] = 0
+                changes["auto_interval_seconds"] = 0
 
         token = _resolve_sync_token(data.get("token"))
         app_state["sync_runtime_token"] = token if token else app_state.get("sync_runtime_token", "")
-        app_state["sync_settings"] = _sanitize_sync_settings(merged)
-        _persist_sync_settings_to_profile(app_state["sync_settings"])
+        settings = _update_sync_settings(**changes)
+        _persist_sync_settings_to_profile(settings)
 
         return jsonify({
             "success": True,
-            "settings": app_state["sync_settings"]
+            "settings": settings
         })
     except Exception as e:
         print(f"[Sync Settings POST Error] {e}")
@@ -55056,10 +55073,10 @@ def sync_push():
         if not token:
             return jsonify({"success": False, "error": "Missing GitHub token"}), 400
 
-        settings["gist_id"] = gist_id
+        changes = {"gist_id": gist_id}
         if str(data.get("device_id", "")).strip():
-            settings["device_id"] = str(data.get("device_id", "")).strip()
-        app_state["sync_settings"] = settings
+            changes["device_id"] = str(data.get("device_id", "")).strip()
+        settings = _update_sync_settings(**changes)
         app_state["sync_runtime_token"] = token if token else app_state.get("sync_runtime_token", "")
         _persist_sync_settings_to_profile(settings)
         result = _sync_now(direction="push", reason="manual_push")
@@ -55074,9 +55091,7 @@ def sync_push():
         })
     except Exception as e:
         print(f"[Sync Push Error] {e}")
-        settings = _sanitize_sync_settings(app_state.get("sync_settings", {}))
-        settings["last_sync_status"] = f"push_error:{e}"
-        app_state["sync_settings"] = settings
+        _update_sync_settings(last_sync_status=f"push_error:{e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/sync/pull', methods=['POST'])
@@ -55091,8 +55106,7 @@ def sync_pull():
         if not token:
             return jsonify({"success": False, "error": "Missing GitHub token"}), 400
 
-        settings["gist_id"] = gist_id
-        app_state["sync_settings"] = settings
+        settings = _update_sync_settings(gist_id=gist_id)
         app_state["sync_runtime_token"] = token if token else app_state.get("sync_runtime_token", "")
         _persist_sync_settings_to_profile(settings)
         result = _sync_now(direction="pull", reason="manual_pull")
@@ -55107,9 +55121,7 @@ def sync_pull():
         })
     except Exception as e:
         print(f"[Sync Pull Error] {e}")
-        settings = _sanitize_sync_settings(app_state.get("sync_settings", {}))
-        settings["last_sync_status"] = f"pull_error:{e}"
-        app_state["sync_settings"] = settings
+        _update_sync_settings(last_sync_status=f"pull_error:{e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 

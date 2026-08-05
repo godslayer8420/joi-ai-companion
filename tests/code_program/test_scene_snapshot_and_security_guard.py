@@ -518,3 +518,52 @@ def test_mutate_home_environment_state_falls_back_to_default_when_unset():
     assert result["touched"] is True
     # _default_home_state() should have populated other baseline keys.
     assert len(result) > 1
+
+
+# ---------------------------------------------------------------------------
+# sync_settings locking (first reviewed batch: the simple, non-network call
+# sites). _sync_now/_auto_sync_if_due do real GitHub gist network I/O and
+# are already serialized by their own _sync_lock; deliberately left
+# unmigrated this batch as higher-risk -- see session todos.
+#
+# Note: _sanitize_sync_settings only ever returns its known fixed schema
+# (from SYNC_SETTINGS_DEFAULTS) -- unlike other locked keys, it does not
+# pass through arbitrary unknown top-level keys. So "preserves concurrent
+# state" here means an already-known field survives an update to a
+# *different* known field, not an arbitrary unrelated key.
+# ---------------------------------------------------------------------------
+
+def test_update_sync_settings_merges_without_clobbering_other_known_fields():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["sync_settings"] = web_ui._sanitize_sync_settings({"gist_id": "existing-gist"})
+    result = web_ui._update_sync_settings(device_id="new-device")
+    assert result["device_id"] == "new-device"
+    # A different already-set field must survive the merge-write.
+    assert result["gist_id"] == "existing-gist"
+    assert web_ui.app_state["sync_settings"] == result
+
+
+def test_update_sync_settings_route_merges_without_clobbering():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["sync_settings"] = web_ui._sanitize_sync_settings({"gist_id": "existing-gist"})
+    client = web_ui.app.test_client()
+    resp = client.post("/api/sync/settings", json={"device_id": "laptop-1"})
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["success"] is True
+    assert payload["settings"]["device_id"] == "laptop-1"
+    # Unrelated already-set field must survive the merge-write.
+    assert payload["settings"]["gist_id"] == "existing-gist"
+    assert web_ui.app_state["sync_settings"] == payload["settings"]
+
+
+def test_sync_push_route_requires_gist_and_token():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["sync_settings"] = web_ui._sanitize_sync_settings({})
+    client = web_ui.app.test_client()
+    resp = client.post("/api/sync/push", json={})
+    assert resp.status_code == 400
+    payload = resp.get_json()
+    assert payload["success"] is False
+    assert "gist_id" in payload["error"].lower()
+
