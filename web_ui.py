@@ -4868,8 +4868,9 @@ def _resolve_special_ability_registry():
         })
     registry["ability_log"] = logs[-400:]
     registry["last_updated_at"] = str(registry.get("last_updated_at", "") or "")[:80] or None
-    wc["special_ability_registry"] = registry
-    app_state["world_continuity"] = wc
+    def _apply(wc):
+        wc["special_ability_registry"] = registry
+    _mutate_world_continuity(_apply)
     return registry
 
 
@@ -5117,17 +5118,17 @@ def _summon_layer_guardian(layer_id=None, location_id=None, location_label=None,
     presence["last_summoned_layer_id"] = str(target_place.get("id", "") or "")[:80]
     presence["last_summoned_to"] = resolved_location_label[:120]
     presence["last_updated_at"] = now_iso
-    wc = dict(app_state.get("world_continuity") or {})
-    wc["guardian_presence"] = presence
-    wc["saved_activity"] = {
-        "activity": f"summoned {entry['guardian_name']}",
-        "location": resolved_location_label,
-        "source": "layer_guardian",
-        "details": f"{entry['guardian_name']} from {entry['layer_name']} answered the call and is now present.",
-        "savedAt": now_iso,
-    }
-    wc["synced_at"] = now_iso
-    app_state["world_continuity"] = wc
+    def _apply(wc):
+        wc["guardian_presence"] = presence
+        wc["saved_activity"] = {
+            "activity": f"summoned {entry['guardian_name']}",
+            "location": resolved_location_label,
+            "source": "layer_guardian",
+            "details": f"{entry['guardian_name']} from {entry['layer_name']} answered the call and is now present.",
+            "savedAt": now_iso,
+        }
+        wc["synced_at"] = now_iso
+    _mutate_world_continuity(_apply)
     _persist_perception_cadence_to_profile()
     return {"guardian_presence": presence, "summoned_guardian": entry, "guardian": guardian, "layer": target_place}
 
@@ -5998,16 +5999,18 @@ def _resolve_world_force_state():
         item["created_by"] = str(item.get("created_by", "player_chat") or "player_chat")[:40]
         item["updated_at"] = str(item.get("updated_at", "") or "")[:80] or datetime.utcnow().isoformat()
         rows.append(item)
-    wc["world_forces"] = rows[-240:]
-    app_state["world_continuity"] = wc
-    return rows[-240:]
+    trimmed = rows[-240:]
+    def _apply(wc_inner):
+        wc_inner["world_forces"] = trimmed
+    _mutate_world_continuity(_apply)
+    return trimmed
 
 
 def _save_world_force_state(rows):
-    wc = dict(app_state.get("world_continuity") or {})
-    wc["world_forces"] = list(rows or [])[-240:]
-    wc["synced_at"] = datetime.utcnow().isoformat()
-    app_state["world_continuity"] = wc
+    def _apply(wc):
+        wc["world_forces"] = list(rows or [])[-240:]
+        wc["synced_at"] = datetime.utcnow().isoformat()
+    _mutate_world_continuity(_apply)
     _persist_perception_cadence_to_profile()
     return _resolve_world_force_state()
 
@@ -6133,16 +6136,17 @@ def _resolve_time_control_state():
     if state["owner_name"] and state["owner_name"] not in controllers:
         controllers.append(state["owner_name"])
     state["controller_entities"] = controllers[:24]
-    wc["time_control"] = state
-    app_state["world_continuity"] = wc
+    def _apply(wc_inner):
+        wc_inner["time_control"] = state
+    _mutate_world_continuity(_apply)
     return state
 
 
 def _save_time_control_state(state):
-    wc = dict(app_state.get("world_continuity") or {})
-    wc["time_control"] = dict(state or {})
-    wc["synced_at"] = datetime.utcnow().isoformat()
-    app_state["world_continuity"] = wc
+    def _apply(wc):
+        wc["time_control"] = dict(state or {})
+        wc["synced_at"] = datetime.utcnow().isoformat()
+    _mutate_world_continuity(_apply)
     _persist_perception_cadence_to_profile()
     return _resolve_time_control_state()
 

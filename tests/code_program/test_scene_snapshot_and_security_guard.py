@@ -264,6 +264,46 @@ def test_resolve_guardian_presence_state_defaults_and_merge():
     assert wc["world_builder"] == {"phase": "keep-me"}
 
 
+def test_resolve_special_ability_registry_defaults_and_merge():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["world_continuity"] = {"world_builder": {"phase": "keep-me"}}
+    registry = web_ui._resolve_special_ability_registry()
+    assert registry["enabled"] is True
+    assert registry["entities"] == {}
+    wc = web_ui.app_state["world_continuity"]
+    assert wc["special_ability_registry"] == registry
+    # Unrelated key must survive the merge-write.
+    assert wc["world_builder"] == {"phase": "keep-me"}
+
+
+def test_world_force_state_round_trips_through_world_continuity():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["world_continuity"] = {"guardian_presence": {"summons_enabled": True}}
+    saved = web_ui._save_world_force_state([{"id": "storm", "name": "Storm Front", "summary": "A rolling storm."}])
+    assert len(saved) == 1
+    assert saved[0]["name"] == "Storm Front"
+    wc = web_ui.app_state["world_continuity"]
+    assert wc["world_forces"] == saved
+    assert "synced_at" in wc
+    # Unrelated key must survive.
+    assert wc["guardian_presence"] == {"summons_enabled": True}
+    # A second resolve call should be idempotent (same normalized shape).
+    assert web_ui._resolve_world_force_state() == saved
+
+
+def test_time_control_state_round_trips_through_world_continuity():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["world_continuity"] = {"guardian_presence": {"summons_enabled": True}}
+    state = web_ui._save_time_control_state({"active": True, "owner_name": "Billy"})
+    assert state["active"] is True
+    assert "Billy" in state["controller_entities"]
+    assert "Aurion" in state["controller_entities"]
+    wc = web_ui.app_state["world_continuity"]
+    assert wc["time_control"] == state
+    # Unrelated key must survive.
+    assert wc["guardian_presence"] == {"summons_enabled": True}
+
+
 # ---------------------------------------------------------------------------
 # home_environment locking (second-highest-traffic key; first reviewed
 # batch covers the simple single-route mutators). See session todos for
