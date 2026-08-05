@@ -304,6 +304,51 @@ def test_time_control_state_round_trips_through_world_continuity():
     assert wc["guardian_presence"] == {"summons_enabled": True}
 
 
+def test_resolve_special_ability_registry_round_trip_via_grant():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["world_continuity"] = {"guardian_presence": {"summons_enabled": True}}
+    result = web_ui._grant_special_ability(
+        entity_id="test-npc", entity_name="Test NPC", entity_type="world_entity",
+        ability_name="Test Ability", description="A test-only ability.",
+    )
+    assert result["ability"]["name"] == "Test Ability"
+    wc = web_ui.app_state["world_continuity"]
+    assert "test-npc" in wc["special_ability_registry"]["entities"]
+    # Unrelated key must survive.
+    assert wc["guardian_presence"] == {"summons_enabled": True}
+
+
+def test_offscreen_life_route_locks_world_continuity_without_clobbering():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["world_continuity"] = {"guardian_presence": {"summons_enabled": True}}
+    client = web_ui.app.test_client()
+    resp = client.post("/api/world/offscreen-life", json={"enabled": True, "procedural_density": "ultra"})
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["success"] is True
+    assert payload["offscreen_simulation"]["procedural_density"] == "ultra"
+    wc = web_ui.app_state["world_continuity"]
+    assert wc["offscreen_simulation"]["procedural_density"] == "ultra"
+    assert "synced_at" in wc
+    # Unrelated key from before the request must survive the merge-write.
+    assert wc["guardian_presence"] == {"summons_enabled": True}
+
+
+def test_spacefaring_load_screen_route_locks_world_continuity_without_clobbering():
+    with web_ui._APP_STATE_LOCK:
+        web_ui.app_state["world_continuity"] = {"guardian_presence": {"summons_enabled": True}}
+    client = web_ui.app.test_client()
+    resp = client.post("/api/world/spacefaring/load-screen", json={"active": True, "label": "Testing"})
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["success"] is True
+    assert payload["spacefaring"]["load_screen"]["label"] == "Testing"
+    wc = web_ui.app_state["world_continuity"]
+    assert wc["spacefaring"]["load_screen"]["label"] == "Testing"
+    # Unrelated key from before the request must survive the merge-write.
+    assert wc["guardian_presence"] == {"summons_enabled": True}
+
+
 # ---------------------------------------------------------------------------
 # home_environment locking (second-highest-traffic key; first reviewed
 # batch covers the simple single-route mutators). See session todos for

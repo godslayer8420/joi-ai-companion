@@ -56,11 +56,13 @@ jobs:
       - name: Smoke-import web_ui (must not start autonomy threads)
         env:
           AURION_TESTING: "1"
+          AURION_MEMORY_DB_PATH: ${{ runner.temp }}/aurion_ci_memory.json
         run: |
           python -c "import threading; before = threading.active_count(); import web_ui; after = threading.active_count(); assert web_ui._ENABLE_AUTONOMY_THREADS is False, 'autonomy threads must stay off during import under AURION_TESTING'; assert web_ui._rc_push_thread is None; print(f'threads before={before} after={after}: OK')"
 
       - name: Run code-program test suite
         env:
           AURION_TESTING: "1"
+          AURION_MEMORY_DB_PATH: ${{ runner.temp }}/aurion_ci_memory.json
         run: |
           python -m pytest tests/code_program -q

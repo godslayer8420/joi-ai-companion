@@ -56781,9 +56781,11 @@ def update_world_sovereign_skills():
             skills["translation_prefix"] = str(data.get("translation_prefix", "Translation phrase:") or "Translation phrase:")[:64]
         if "summary" in data:
             skills["summary"] = str(data.get("summary", skills.get("summary", "")) or skills.get("summary", ""))[:220]
-        wc["sovereign_skills"] = _build_cohesive_sovereign_skills_state(skills)
-        wc["synced_at"] = datetime.utcnow().isoformat()
-        app_state["world_continuity"] = wc
+        normalized_skills = _build_cohesive_sovereign_skills_state(skills)
+        def _apply(wc_inner):
+            wc_inner["sovereign_skills"] = normalized_skills
+            wc_inner["synced_at"] = datetime.utcnow().isoformat()
+        _mutate_world_continuity(_apply)
         _persist_perception_cadence_to_profile()
         return jsonify({"success": True, "sovereign_skills": skills})
     except Exception as e:
@@ -56814,9 +56816,10 @@ def update_offscreen_life_state():
             density = str(data.get("procedural_density", state.get("procedural_density", "high")) or "high").strip().lower()
             if density in {"low", "medium", "high", "ultra"}:
                 state["procedural_density"] = density
-        wc["offscreen_simulation"] = state
-        wc["synced_at"] = datetime.utcnow().isoformat()
-        app_state["world_continuity"] = wc
+        def _apply(wc_inner):
+            wc_inner["offscreen_simulation"] = state
+            wc_inner["synced_at"] = datetime.utcnow().isoformat()
+        _mutate_world_continuity(_apply)
         _persist_perception_cadence_to_profile()
         return jsonify({"success": True, "offscreen_simulation": state})
     except Exception as e:
@@ -56967,14 +56970,14 @@ def set_spacefaring_travel():
             f"mode {travel.get('requested_mode', travel.get('mode', 'idle'))} · "
             f"{'infinite fuel' if state.get('infinite_fuel', True) else 'finite fuel'}."
         )
-        wc["spacefaring"] = state
-        wc["synced_at"] = now_iso
-        app_state["world_continuity"] = wc
+        def _apply(wc_inner):
+            wc_inner["spacefaring"] = state
+            wc_inner["synced_at"] = now_iso
+        _mutate_world_continuity(_apply)
         _persist_perception_cadence_to_profile()
         return jsonify({"success": True, "spacefaring": state})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
-
 
 @app.route('/api/world/spacefaring/destinations', methods=['GET'])
 def get_spacefaring_destinations():
@@ -57029,9 +57032,10 @@ def update_spacefaring_destination():
             event=str(data.get("event", "named_destination") or "named_destination"),
             record_visit=bool(data.get("record_visit", False))
         )
-        wc["spacefaring"] = state
-        wc["synced_at"] = datetime.utcnow().isoformat()
-        app_state["world_continuity"] = wc
+        def _apply(wc_inner):
+            wc_inner["spacefaring"] = state
+            wc_inner["synced_at"] = datetime.utcnow().isoformat()
+        _mutate_world_continuity(_apply)
         _persist_perception_cadence_to_profile()
         return jsonify({"success": True, "destination": saved_entry, "spacefaring": state})
     except Exception as e:
@@ -57115,8 +57119,9 @@ def update_spacefaring_vehicle():
         registry_map = {str(row.get("id", "")).strip().lower(): dict(row or {}) for row in vehicles if isinstance(row, dict)}
         registry_map[merged["id"].lower()] = merged
         state["vehicle_registry"] = list(registry_map.values())[-120:]
+        active_drive_update = None
         if action in {"drive", "ride", "fly"}:
-            wc["active_drive"] = {
+            active_drive_update = {
                 "vehicle": merged["name"],
                 "vehicle_id": merged["id"],
                 "kind": merged["kind"],
@@ -57125,9 +57130,12 @@ def update_spacefaring_vehicle():
                 "control_access": "aurion_and_billy_only",
                 "started_at": datetime.utcnow().isoformat(),
             }
-        wc["spacefaring"] = state
-        wc["synced_at"] = datetime.utcnow().isoformat()
-        app_state["world_continuity"] = wc
+        def _apply(wc_inner):
+            if active_drive_update is not None:
+                wc_inner["active_drive"] = active_drive_update
+            wc_inner["spacefaring"] = state
+            wc_inner["synced_at"] = datetime.utcnow().isoformat()
+        wc = _mutate_world_continuity(_apply)
         _persist_perception_cadence_to_profile()
         _persist_live_senses_snapshot(reason="spacefaring-vehicle")
         return jsonify({"success": True, "vehicle": merged, "spacefaring": state, "active_drive": wc.get("active_drive")})
@@ -57187,9 +57195,10 @@ def update_spacefaring_companions():
         companions[bucket_name] = list(registry_map.values())[-240:]
         companions["last_updated_at"] = datetime.utcnow().isoformat()
         state["alien_companions"] = companions
-        wc["spacefaring"] = state
-        wc["synced_at"] = datetime.utcnow().isoformat()
-        app_state["world_continuity"] = wc
+        def _apply(wc_inner):
+            wc_inner["spacefaring"] = state
+            wc_inner["synced_at"] = datetime.utcnow().isoformat()
+        _mutate_world_continuity(_apply)
         _persist_perception_cadence_to_profile()
         _persist_live_senses_snapshot(reason="spacefaring-companion")
         return jsonify({"success": True, "companion": merged, "alien_companions": companions})
@@ -57253,9 +57262,10 @@ def update_spacefaring_digitized_items():
         digitized["allowed_sources"] = ["uploaded_image", "found_image"]
         digitized["last_digitized_at"] = datetime.utcnow().isoformat()
         state["digitized_items"] = digitized
-        wc["spacefaring"] = state
-        wc["synced_at"] = datetime.utcnow().isoformat()
-        app_state["world_continuity"] = wc
+        def _apply(wc_inner):
+            wc_inner["spacefaring"] = state
+            wc_inner["synced_at"] = datetime.utcnow().isoformat()
+        _mutate_world_continuity(_apply)
         _persist_perception_cadence_to_profile()
         _persist_live_senses_snapshot(reason="spacefaring-digitized-item")
         return jsonify({"success": True, "item": merged, "digitized_items": digitized})
@@ -57284,9 +57294,10 @@ def set_spacefaring_load_screen():
             load["loop_until_render_complete"] = bool(data.get("loop_until_render_complete"))
         state["load_screen"] = load
         state["last_updated_at"] = datetime.utcnow().isoformat()
-        wc["spacefaring"] = state
-        wc["synced_at"] = datetime.utcnow().isoformat()
-        app_state["world_continuity"] = wc
+        def _apply(wc_inner):
+            wc_inner["spacefaring"] = state
+            wc_inner["synced_at"] = datetime.utcnow().isoformat()
+        _mutate_world_continuity(_apply)
         _persist_perception_cadence_to_profile()
         return jsonify({"success": True, "spacefaring": state})
     except Exception as e:
