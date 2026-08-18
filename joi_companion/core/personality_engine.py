@@ -53,6 +53,56 @@ class BudgetManager:
             "preferred_free_capacity": ["custom_local", "ollama", "sillytavern", "oobabooga", "openrouter"],
         }
 
+
+class BudgetAlert:
+    """Tracks estimated token spend per session and fires warnings at 25/50/75% of the configured limit."""
+
+    THRESHOLDS = [0.25, 0.50, 0.75]
+
+    def __init__(self):
+        # Limit in tokens — set AURION_TOKEN_BUDGET_LIMIT env var to override
+        self.limit = int(os.getenv("AURION_TOKEN_BUDGET_LIMIT", "100000"))
+        self.spent = 0
+        self._fired: set[float] = set()
+        self.enabled = str(os.getenv("AURION_BUDGET_ALERT", "true")).strip().lower() not in ("0", "false", "off")
+        self._free_suggestions = [
+            "switch to 'gemini-3-flash-preview' (free, confirmed working)",
+            "use LM Studio (localhost:1234) with Saturn-7B or Ouroboros-Next-9B (free, local)",
+            "use Ollama with a local GGUF (zero API cost)",
+        ]
+
+    def record(self, prompt_tokens: int, completion_tokens: int = 0):
+        """Call after every LLM completion to track spend. Returns alert message or None."""
+        if not self.enabled:
+            return None
+        self.spent += prompt_tokens + completion_tokens
+        for threshold in self.THRESHOLDS:
+            if self.spent >= self.limit * threshold and threshold not in self._fired:
+                self._fired.add(threshold)
+                pct = int(threshold * 100)
+                remaining = max(0, self.limit - self.spent)
+                msg = (
+                    f"⚠️  [BudgetAlert] {pct}% of session token budget used "
+                    f"({self.spent:,} / {self.limit:,} tokens, ~{remaining:,} remaining).\n"
+                    f"   Free alternatives: {'; '.join(self._free_suggestions)}"
+                )
+                return msg
+        return None
+
+    def status(self) -> dict:
+        pct = round(self.spent / self.limit * 100, 1) if self.limit else 0
+        return {
+            "spent": self.spent,
+            "limit": self.limit,
+            "percent_used": pct,
+            "alerts_fired": sorted(self._fired),
+            "remaining": max(0, self.limit - self.spent),
+        }
+
+    def reset(self):
+        self.spent = 0
+        self._fired.clear()
+
 class _CohereClientAdapter:
     """Adapts a cohere.Client to look like an OpenAI-chat-style client so existing call sites work."""
     def __init__(self, cohere_client):
@@ -107,6 +157,7 @@ class PersonalityEngine:
             self.nlp = None
 
         self.budget_manager = BudgetManager()
+        self.budget_alert = BudgetAlert()
         self.llm_provider = "none"
         self.custom_model_aliases = {}  # populated at runtime by web_ui when custom models are loaded
         self.llm_clients = {}  # provider -> initialized client
@@ -502,6 +553,36 @@ class PersonalityEngine:
             "nous-hermes3": "hf.co/NousResearch/Hermes-3-Llama-3.1-8B-GGUF",
             "hermes-3-llama-3.1": "hf.co/NousResearch/Hermes-3-Llama-3.1-8B-GGUF",
             "hf.co/nousresearch/hermes-3-llama-3.1-8b-gguf": "hf.co/NousResearch/Hermes-3-Llama-3.1-8B-GGUF",
+            # ── LM Studio local models (serve via localhost:1234) ─────────────
+            "ouroboros-next": "Ouroboros-Next-9B-Q4_K_M",
+            "ouroboros-next-9b": "Ouroboros-Next-9B-Q4_K_M",
+            "ouroboros-9b": "Ouroboros-Next-9B-Q4_K_M",
+            "13b-ouroboros": "13B-Ouroboros.Q3_K_S",
+            "ouroboros-13b": "13B-Ouroboros.Q3_K_S",
+            "saturn": "Saturn-7B.Q4_K_S",
+            "saturn-7b": "Saturn-7B.Q4_K_S",
+            "eva": "EVA-Qwen2.5-7B-v0.1.Q8_0",
+            "eva-7b": "EVA-Qwen2.5-7B-v0.1.Q8_0",
+            "eva-qwen": "EVA-Qwen2.5-7B-v0.1.Q8_0",
+            "gemma-4-12b": "gemma-4-12B-it-MTP-Q8_0",
+            "gemma4-12b": "gemma-4-12B-it-MTP-Q8_0",
+            "gemma-4-26b-local": "gemma-4-26B-A4B-it-Q8_0",
+            "gemma4-26b-local": "gemma-4-26B-A4B-it-Q8_0",
+            "spicyboros": "spicyboros-7b-2.2.Q4_K_S",
+            "spicyboros-7b": "spicyboros-7b-2.2.Q4_K_S",
+            "spicyboros-13b": "spicyboros-13b-2.2.Q3_K_S",
+            "spicyboros-34b": "spicyboros-c34b-2.2.Q3_K_S",
+            "nuro": "nuro-copilot-7b.Q4_K_S",
+            "nuro-7b": "nuro-copilot-7b.Q4_K_S",
+            "nuro-copilot": "nuro-copilot-7b.Q4_K_S",
+            "qwythos": "Qwythos-9B-Claude-Mythos-5-1M-uncensored-heretic-mmproj-BF16",
+            "qwythos-9b": "Qwythos-9B-Claude-Mythos-5-1M-uncensored-heretic-mmproj-BF16",
+            "lfm": "LFM2.5-2.6B-Uncensored.Q5_K_S",
+            "lfm-2.5": "LFM2.5-2.6B-Uncensored.Q5_K_S",
+            "gemma-3-12b-local": "gemma-3-12b-it-Q4_K_M",
+            "gemma3-12b-local": "gemma-3-12b-it-Q4_K_M",
+            "gemma-3-1b": "gemma-3-1b-it.Q8_0",
+            "joi-mode": "gemma-3-1b-it.BF16",
             # ── Gemma 4 (Google AI Studio API — free tier) ────────────────────
             "gemma4-26b": "gemma-4-26b-a4b-it",
             "gemma-4-26b": "gemma-4-26b-a4b-it",
@@ -510,11 +591,11 @@ class PersonalityEngine:
             "gemma4-31b": "gemma-4-31b-it",
             "gemma-4-31b": "gemma-4-31b-it",
             "gemma-4-31b-it": "gemma-4-31b-it",
-            # ── Gemma 3 local GGUF (via Ollama gemma_modelfile) ───────────────
+            # ── Gemma 3 voice GGUF (Ollama — ai_core/gemma_modelfile.txt) ─────
             "gemma3-voice": "gemma3-voice",
             "gemma3-12b": "gemma3-voice",
             "gemma-3-12b-voice": "gemma3-voice",
-            # ── Gemini free models (Google AI Studio) ─────────────────────────
+            # ── Gemini free models (Google AI Studio — project: Aurion) ───────
             "gemini-flash": "gemini-3-flash-preview",
             "gemini3-flash": "gemini-3-flash-preview",
             "gemini-3-flash": "gemini-3-flash-preview",
@@ -1490,6 +1571,13 @@ class PersonalityEngine:
                         self.llm_orchestration["last_provider"] = primary
                         return merged
         self.llm_orchestration["last_provider"] = primary
+        # Track token spend for BudgetAlert (estimate if no usage metadata)
+        prompt_tokens = sum(len(str(m.get("content", ""))) // 4 for m in messages)
+        completion_tokens = len(str(primary_response or "")) // 4
+        alert_msg = self.budget_alert.record(prompt_tokens, completion_tokens)
+        if alert_msg:
+            # Inject alert as a prefix so Billy sees it in the chat
+            return f"{alert_msg}\n\n{primary_response}" if primary_response else alert_msg
         return primary_response
 
     def _persist_thought(self, user_text, reasoning, insight, memory_system=None):
