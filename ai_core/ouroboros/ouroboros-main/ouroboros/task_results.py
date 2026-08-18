@@ -1,0 +1,967 @@
+"""Helpers for durable task result/status files."""
+
+from __future__ import annotations
+
+import copy
+import json
+import logging
+import pathlib
+import re
+from typing import Any, Callable, Dict, List, Optional
+
+from ouroboros.cost_projection import COST_ALIAS_PAIRS, COST_OPENNESS_FIELDS
+from ouroboros.utils import read_json_dict, update_json_locked, utc_now_iso
+
+log = logging.getLogger(__name__)
+
+STATUS_REQUESTED = "requested"
+STATUS_SCHEDULED = "scheduled"
+STATUS_RUNNING = "running"
+STATUS_COMPLETED = "completed"
+STATUS_REJECTED_DUPLICATE = "rejected_duplicate"
+STATUS_FAILED = "failed"
+STATUS_INTERRUPTED = "interrupted"
+STATUS_CANCELLED = "cancelled"
+
+# Intent latch: the agent/owner asked to cancel, but the supervisor has not yet
+# torn the task down. Ranks above running so a late running/scheduled mirror
+# cannot resurrect it, but below the truly-terminal statuses so the eventual
+# STATUS_CANCELLED write still lands.
+STATUS_CANCEL_REQUESTED = "cancel_requested"
+
+# The flat task-scope cost fields shared by live task events, progress-row
+# replay, task_summary chat rows, and the persisted result written here (v6.82
+# P1) — one home, so no consumer grows a divergent literal list.
+# DERIVED from the cost SSOT (``ouroboros/cost_projection.py``) rather than
+# re-typed: both alias spellings (C2, owner 10=B — the additive HONEST names for
+# what ``cost_usd[_with_children]`` always were, plus the deprecated aliases that
+# stay outbound until a separately approved ABI break) and EVERY accounting
+# openness/integrity marker. Hand-maintained copies are how a marker reaches one
+# surface and not the next: ``non_final_rows`` rides with ``cost_final`` because
+# it is that flag's DISCLOSED CAUSE (v6.89.0 panel D2), and
+# ``ledger_integrity_degraded`` was produced by the authority but named in no
+# list at all, so it never reached any surface.
+TASK_COST_META_FIELDS = tuple(dict.fromkeys(
+    [name for pair in COST_ALIAS_PAIRS for name in pair] + list(COST_OPENNESS_FIELDS)
+))
+
+# Monotonic lifecycle ordering. A write that would move a task *backwards* past
+# the cancel-intent latch or a terminal status is ignored, so a stale
+# scheduled/running mirror can never clobber a cancel/terminal outcome
+# (the "ghost subagent" class). Unknown statuses are unranked and never block.
+_TRULY_TERMINAL_STATUSES = frozenset({
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_CANCELLED,
+    STATUS_REJECTED_DUPLICATE,
+})
+_STATUS_RANK = {
+    STATUS_REQUESTED: 0,
+    STATUS_SCHEDULED: 1,
+    STATUS_RUNNING: 2,
+    STATUS_INTERRUPTED: 2,
+    STATUS_CANCEL_REQUESTED: 3,
+    STATUS_COMPLETED: 4,
+    STATUS_FAILED: 4,
+    STATUS_CANCELLED: 4,
+    STATUS_REJECTED_DUPLICATE: 4,
+}
+# Regressions are only blocked once a task reaches the cancel-intent latch or a
+# terminal state; normal forward progress (requested->scheduled->running) and
+# unknown statuses are always allowed.
+_REGRESSION_GUARD_FLOOR = _STATUS_RANK[STATUS_CANCEL_REQUESTED]
+
+_TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+PLAN_REVIEW_STATE_KEY = "plan_review_state"
+_PLAN_REVIEW_STATE_VERSION = 2
+_PLAN_REVIEW_STATE_MAX_BYTES = 1_000_000
+_PLAN_REVIEW_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_PLAN_REVIEW_REASON_MAX_CHARS = 2_000
+
+
+def cancellation_blocks_child_result(result: Any) -> bool:
+    """Return whether canonical cancellation forbids child-drive promotion.
+
+    Only a supervisor-SETTLED ``cancelled`` blocks: cancel INTENT no longer rides
+    the canonical status (it lives in the durable ``cancel_intents`` projection),
+    and natural completion WINS a late cancel (owner decision 4=A, 2026-08-11) —
+    a child that finished before the teardown keeps its completed result and
+    artifacts, so copy-back paths must promote it rather than refuse it.
+    """
+
+    if not isinstance(result, dict):
+        return False
+    return str(result.get("status") or "").strip().lower() == STATUS_CANCELLED
+
+
+def resolve_task_lineage(
+    task_id: Any,
+    *,
+    metadata: Any = None,
+    root_task_id: Any = None,
+    parent_task_id: Any = None,
+    delegation_role: Any = None,
+    original_task_id: Any = None,
+    timeout_retry_from: Any = None,
+) -> Dict[str, Any]:
+    """Return one typed lineage projection for root-owned lifecycle gates.
+
+    ``root_task_id`` is the logical subtree/budget authority and intentionally
+    survives a top-level hard-timeout retry that receives a fresh physical
+    ``task_id``.  Such a retry is a root *attempt* only when the two independent
+    host-written retry markers agree.  This keeps malformed lineage fail-closed
+    without splitting budget, fence, task-tree, or cost authorities.
+    """
+
+    meta = metadata if isinstance(metadata, dict) else {}
+
+    def _field(explicit: Any, key: str) -> str:
+        # ``None`` means the canonical carrier is absent.  An explicit empty
+        # parent is meaningful and must override stale copied metadata.
+        value = explicit if explicit is not None else meta.get(key)
+        return str(value or "").strip()
+
+    resolved_task_id = str(task_id or "").strip()
+    resolved_root_id = _field(root_task_id, "root_task_id") or resolved_task_id
+    resolved_parent_id = _field(parent_task_id, "parent_task_id")
+    resolved_role = _field(delegation_role, "delegation_role").lower()
+    resolved_original_id = _field(original_task_id, "original_task_id")
+    resolved_retry_from = _field(timeout_retry_from, "timeout_retry_from")
+    is_regular_root = bool(
+        resolved_task_id
+        and resolved_root_id == resolved_task_id
+        and not resolved_parent_id
+        and resolved_role != "subagent"
+    )
+    is_retry_root = bool(
+        resolved_task_id
+        and resolved_root_id
+        and resolved_root_id != resolved_task_id
+        and not resolved_parent_id
+        and resolved_role == "root"
+        and resolved_original_id
+        and resolved_original_id == resolved_retry_from
+        and resolved_original_id != resolved_task_id
+    )
+    return {
+        "task_id": resolved_task_id,
+        "root_task_id": resolved_root_id,
+        "parent_task_id": resolved_parent_id,
+        "delegation_role": resolved_role,
+        "original_task_id": resolved_original_id,
+        "timeout_retry_from": resolved_retry_from,
+        "is_retry_root_attempt": is_retry_root,
+        "is_root_task": bool(is_regular_root or is_retry_root),
+    }
+
+
+def _is_status_regression(existing_status: str, new_status: str) -> bool:
+    """Return True when writing *new_status* over *existing_status* would
+    regress or corrupt a task that has already reached cancel-intent or a
+    terminal state.
+
+    Rules:
+      - Unknown statuses never block (forward-compatible).
+      - Truly-terminal is sticky: once completed/failed/cancelled/rejected, only
+        a same-status rewrite is allowed (result/trace enrichment). Switching to
+        a *different* terminal status (e.g. cancelled -> completed) is blocked.
+      - cancel-intent (cancel_requested) blocks regress to running/scheduled but
+        still allows the supervisor's eventual terminal write (rank 3 -> 4).
+    """
+    existing = str(existing_status or "")
+    new = str(new_status or "")
+    # Sticky terminal FIRST — independent of whether the new status is ranked, so
+    # a typo/unknown/future status can never overwrite a terminal one. Only an
+    # identical-status rewrite (result/trace enrichment) is allowed.
+    if existing in _TRULY_TERMINAL_STATUSES:
+        return new != existing
+    if existing == STATUS_CANCEL_REQUESTED:
+        # LEGACY read-path only (pre-intent files): the latch status is no longer
+        # written — cancel intent lives in the durable ``cancel_intents``
+        # projection. Natural completion WINS (owner decision 4=A): any terminal
+        # write, including a racing ``completed``, may land over an old latch;
+        # only a regression to scheduled/running is refused.
+        new_rank = _STATUS_RANK.get(new)
+        return new_rank is not None and new_rank < _STATUS_RANK[STATUS_CANCEL_REQUESTED]
+    existing_rank = _STATUS_RANK.get(existing)
+    new_rank = _STATUS_RANK.get(new)
+    if existing_rank is None or new_rank is None:
+        return False
+    if existing_rank >= _REGRESSION_GUARD_FLOOR:
+        return new_rank < existing_rank
+    return False
+
+
+def validate_task_id(task_id: Any) -> str:
+    text = str(task_id or "").strip()
+    if not _TASK_ID_RE.fullmatch(text):
+        raise ValueError("task_id must match [A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+    return text
+
+
+def task_results_dir(drive_root: Any, *, create: bool = True) -> pathlib.Path:
+    """Resolve ``<drive_root>/task_results``.
+
+    ``create`` controls the mkdir side effect: WRITE callers leave it True so the
+    directory exists before the write; READ/LIST callers pass ``create=False`` so a
+    scan of a never-provisioned (or stubbed) root returns nothing instead of
+    MATERIALISING the directory. The latter previously let an unguarded scan with a
+    MagicMock-derived root create a stray ``MagicMock/.../task_results`` tree in cwd.
+    """
+    path = pathlib.Path(drive_root) / "task_results"
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def task_result_path(drive_root: Any, task_id: str, *, create: bool = True) -> pathlib.Path:
+    return task_results_dir(drive_root, create=create) / f"{validate_task_id(task_id)}.json"
+
+
+def load_task_result(drive_root: Any, task_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        path = task_result_path(drive_root, task_id, create=False)
+    except ValueError:
+        return None
+    return read_json_dict(path)
+
+
+def list_task_results(
+    drive_root: Any,
+    *,
+    statuses: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    wanted = {str(item) for item in list(statuses or []) if str(item).strip()}
+    results: List[Dict[str, Any]] = []
+    for path in sorted(task_results_dir(drive_root, create=False).glob("*.json")):
+        data = read_json_dict(path)
+        if data is None:
+            continue
+        if wanted and str(data.get("status") or "") not in wanted:
+            continue
+        results.append(data)
+    return results
+
+
+def write_task_result(
+    results_drive_root: Any,
+    task_id: str,
+    status: str,
+    **fields: Any,
+) -> Dict[str, Any]:
+    """Merge-write a task result under a per-file lock.
+
+    Worker processes, the supervisor thread, and gateway handlers all
+    read-modify-write the same ``task_results/<id>.json``; the lock makes the
+    monotonic-status guard evaluate the CURRENT on-disk status, so the winner of
+    a concurrent terminal race is decided by the monotonic reducer, not timing.
+    Terminal statuses are sticky: natural completion WINS a late cancel (owner
+    decision 4=A) — there is deliberately no override that lets a cancellation
+    replace an already-completed result (discarding a result is a separate
+    explicit parent action, ``discard_child_result``).
+    """
+    path = task_result_path(results_drive_root, task_id)
+    explicit_ts = str(fields.pop("ts", "") or "")
+
+    def _merge(existing: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # Monotonic lifecycle: never let a stale scheduled/running mirror
+        # overwrite a terminal outcome. This is the structural guard against
+        # "ghost" tasks that keep reporting scheduled/running after they were
+        # cancelled or finished.
+        existing_status = str(existing.get("status") or "")
+        if existing and _is_status_regression(existing_status, status):
+            # Surface the blocked transition: when debugging a "stuck" task this
+            # is the only signal that a stale/late write was intentionally dropped.
+            log.debug("Blocked status regression %s -> %s for task %s",
+                      existing.get("status"), status, task_id)
+            return None
+        now = utc_now_iso()
+        return {
+            **existing,
+            **fields,
+            "task_id": task_id,
+            "status": status,
+            "ts": explicit_ts or str(existing.get("ts") or now),
+            "updated_at": now,
+        }
+
+    # Never fall back to an unlocked read/merge/write. Every task-result write is
+    # lifecycle authority; accepting stale state here makes the winner of a
+    # completed-vs-cancelled race depend on timing rather than the monotonic
+    # reducer above. Callers may retry or fail their transition explicitly.
+    return update_json_locked(path, _merge)
+
+
+
+# --------------------------------------------------------------------------- plan review state
+#
+# ``plan_review_state`` v2 (plan-review redesign, 2026-08-15): the durable record of
+# every ``plan_task`` cycle of ONE task. Task level: ``series_id`` (fresh per first v2
+# wave), ``cycles_paid`` (paid reviewer panels — the shared cap ``review_max_cycles()``
+# binds it), ``need_evidence_seen`` (per-task memory: one locator may be requested once),
+# ``current_attempt`` (the fingerprint the gate projects + open|unavailable|rail_degraded),
+# ``waves`` (bounded: the last ``_PLAN_REVIEW_FULL_WAVES`` in full, older ones compacted,
+# ``waves_omitted`` beyond ``_PLAN_REVIEW_MAX_WAVES``). A v1 record is READ-ONLY: it
+# loads without error under ``legacy_v1``; an open v1 wave projects as
+# ``legacy_open_requires_resubmission`` (S5 — never auto-closed) until a NEW plan_task
+# call starts a fresh v2 series.
+
+_PLAN_REVIEW_FULL_WAVES = 8
+_PLAN_REVIEW_MAX_WAVES = 64
+_PLAN_REVIEW_ATTEMPT_STATUSES = frozenset({"open", "unavailable", "rail_degraded", "cycles_exhausted"})
+_PLAN_REVIEW_AGGREGATES = frozenset({"GREEN", "REVIEW_REQUIRED", "REVISE_PLAN", "DEGRADED"})
+LEGACY_OPEN_STATUS = "legacy_open_requires_resubmission"
+
+
+def _empty_plan_review_state() -> Dict[str, Any]:
+    return {
+        "schema_version": _PLAN_REVIEW_STATE_VERSION,
+        "series_id": "",
+        "cycles_paid": 0,
+        "need_evidence_seen": [],
+        "current_attempt": {},
+        "waves": [],
+        "waves_omitted": 0,
+    }
+
+
+def _legacy_v1_projection(value: Dict[str, Any]) -> Dict[str, Any]:
+    """Read-only projection of a v1 record: ``{fingerprint, status, outcome, closed,
+    acceptance_claims}`` where status ∈ closed | rail_degraded | open (every non-closed
+    v1 ATTEMPT: open review, unavailable) | pending (a wave without any attempt) | absent."""
+    attempt = value.get("current_attempt") if isinstance(value.get("current_attempt"), dict) else {}
+    fingerprint = str(attempt.get("fingerprint") or "") or str(value.get("latest_review_fingerprint") or "")
+    waves = value.get("waves") if isinstance(value.get("waves"), list) else []
+    wave = next((w for w in waves if isinstance(w, dict)
+                 and str(w.get("request_fingerprint") or "") == fingerprint), None) if fingerprint else None
+    review = wave.get("review") if isinstance((wave or {}).get("review"), dict) else {}
+    outcome = str(review.get("aggregate_signal") or "")
+    integrated = bool(review and str((wave or {}).get("phase") or "") == "reviewed"
+                      and str((wave or {}).get("review_evidence_status") or "integrated") != "pending")
+    closed = integrated and bool(review.get("closed")) and outcome in {"GREEN", "REVIEW_REQUIRED"}
+    if closed:
+        status = "closed"
+    elif str(attempt.get("status") or "") == "rail_degraded":
+        status = "rail_degraded"
+    elif fingerprint:
+        status = "open"
+    elif waves:
+        status = "pending"  # a v1 wave that never reached a panel: hold under every policy
+    else:
+        status = "absent"
+    return {
+        "fingerprint": fingerprint, "status": status, "outcome": outcome, "closed": closed,
+        "reason": str(attempt.get("reason") or ""),
+        "acceptance_claims": list((wave or {}).get("acceptance_claims") or []),
+    }
+
+
+def _validated_plan_review_state(value: Any) -> Dict[str, Any]:
+    """Return a private, bounded, shape-checked copy of the host-owned planning state.
+
+    v2 records are validated; a v1 record (``schema_version: 1``) is wrapped read-only:
+    the returned v2 state carries it under ``legacy_v1`` and its projection under
+    ``legacy_v1_projection`` — nothing is migrated, nothing is auto-closed."""
+    if value in (None, {}):
+        return _empty_plan_review_state()
+    if not isinstance(value, dict):
+        raise ValueError("PLAN_REVIEW_STATE_INVALID: unsupported or malformed schema")
+    if value.get("schema_version") == 1:
+        state = _empty_plan_review_state()
+        state["legacy_v1"] = copy.deepcopy(value)
+        state["legacy_v1_projection"] = _legacy_v1_projection(value)
+        return state
+    if value.get("schema_version") != _PLAN_REVIEW_STATE_VERSION:
+        raise ValueError("PLAN_REVIEW_STATE_INVALID: unsupported or malformed schema")
+    waves = value.get("waves")
+    if not isinstance(waves, list) or len(waves) > _PLAN_REVIEW_MAX_WAVES:
+        raise ValueError("PLAN_REVIEW_STATE_INVALID: waves must be a bounded list")
+    seen: set[str] = set()
+    for wave in waves:
+        if not isinstance(wave, dict):
+            raise ValueError("PLAN_REVIEW_STATE_INVALID: wave must be an object")
+        fingerprint = str(wave.get("request_fingerprint") or "")
+        if not _PLAN_REVIEW_HASH_RE.fullmatch(fingerprint) or fingerprint in seen:
+            raise ValueError("PLAN_REVIEW_STATE_INVALID: wave fingerprints must be unique")
+        if str(wave.get("aggregate") or "") not in _PLAN_REVIEW_AGGREGATES:
+            raise ValueError("PLAN_REVIEW_STATE_INVALID: invalid wave aggregate")
+        if not isinstance(wave.get("closed"), bool):
+            raise ValueError("PLAN_REVIEW_STATE_INVALID: wave closed must be boolean")
+        if wave["aggregate"] == "GREEN" and not wave["closed"]:
+            raise ValueError("PLAN_REVIEW_STATE_INVALID: GREEN wave must be closed")
+        if wave["aggregate"] in {"REVISE_PLAN", "DEGRADED"} and wave["closed"]:
+            raise ValueError("PLAN_REVIEW_STATE_INVALID: REVISE_PLAN/DEGRADED wave cannot be closed")
+        if not wave.get("compact"):
+            if not isinstance(wave.get("spec"), dict) or not isinstance(wave.get("findings"), list):
+                raise ValueError("PLAN_REVIEW_STATE_INVALID: full wave needs spec and findings")
+            if not isinstance(wave.get("dispositions", []), list):
+                raise ValueError("PLAN_REVIEW_STATE_INVALID: dispositions must be a list")
+        seen.add(fingerprint)
+    cycles_paid = value.get("cycles_paid", 0)
+    if not isinstance(cycles_paid, int) or isinstance(cycles_paid, bool) or cycles_paid < 0:
+        raise ValueError("PLAN_REVIEW_STATE_INVALID: cycles_paid must be a non-negative count")
+    if not isinstance(value.get("need_evidence_seen", []), list):
+        raise ValueError("PLAN_REVIEW_STATE_INVALID: need_evidence_seen must be a list")
+    copied = {**_empty_plan_review_state(), **copy.deepcopy(value)}
+    attempt = copied.get("current_attempt")
+    if not isinstance(attempt, dict):
+        raise ValueError("PLAN_REVIEW_STATE_INVALID: current_attempt must be an object")
+    if attempt:
+        if set(attempt) != {"fingerprint", "status", "reason"}:
+            raise ValueError("PLAN_REVIEW_STATE_INVALID: current_attempt shape is invalid")
+        if not _PLAN_REVIEW_HASH_RE.fullmatch(str(attempt.get("fingerprint") or "")):
+            raise ValueError("PLAN_REVIEW_STATE_INVALID: current attempt fingerprint is invalid")
+        if str(attempt.get("status") or "") not in _PLAN_REVIEW_ATTEMPT_STATUSES:
+            raise ValueError("PLAN_REVIEW_STATE_INVALID: current attempt status is invalid")
+        if len(str(attempt.get("reason") or "")) > _PLAN_REVIEW_REASON_MAX_CHARS:
+            raise ValueError("PLAN_REVIEW_STATE_INVALID: current attempt reason is too large")
+    if len(json.dumps(copied, ensure_ascii=False, default=str).encode("utf-8")) > _PLAN_REVIEW_STATE_MAX_BYTES:
+        raise ValueError("PLAN_REVIEW_STATE_INVALID: state exceeds the bounded size limit")
+    return copied
+
+
+def load_plan_review_state(results_drive_root: Any, task_id: str) -> Dict[str, Any]:
+    path = task_result_path(results_drive_root, task_id, create=False)
+    if not path.is_file():
+        return _empty_plan_review_state()
+    result = read_json_dict(path)
+    if result is None:
+        raise ValueError("PLAN_REVIEW_STATE_INVALID: parent task result JSON is malformed")
+    return _validated_plan_review_state(result.get(PLAN_REVIEW_STATE_KEY))
+
+
+def plan_review_wave(state: Dict[str, Any], fingerprint: str) -> Optional[Dict[str, Any]]:
+    """The wave recorded under ``fingerprint`` (full or compact), as a private copy."""
+    for wave in (state or {}).get("waves") or []:
+        if str(wave.get("request_fingerprint") or "") == fingerprint:
+            return copy.deepcopy(wave)
+    return None
+
+
+def current_plan_review_wave(state: Any) -> Optional[Dict[str, Any]]:
+    """The wave the gate projects: the ``current_attempt`` fingerprint's wave, else the
+    latest recorded wave (private copy)."""
+    if not isinstance(state, dict):
+        return None
+    attempt = state.get("current_attempt") if isinstance(state.get("current_attempt"), dict) else {}
+    fingerprint = str(attempt.get("fingerprint") or "")
+    wave = plan_review_wave(state, fingerprint) if fingerprint else None
+    if wave is None:
+        waves = state.get("waves") if isinstance(state.get("waves"), list) else []
+        wave = copy.deepcopy(waves[-1]) if waves and not fingerprint else None
+    return wave
+
+
+def _legacy_projection_of(state: Any) -> Dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    if state.get("schema_version") == 1:
+        return _legacy_v1_projection(state)
+    projection = state.get("legacy_v1_projection")
+    return projection if isinstance(projection, dict) else {}
+
+
+def plan_review_gate_projection(
+    state: Any,
+    enforcement: str,
+    *,
+    hard_rail: str = "",
+) -> Dict[str, Any]:
+    """Project one plan-review finalization decision from existing authority.
+
+    ``plan_review_state`` is the durable SSOT; the ``current_attempt`` pointer keeps a
+    newer fingerprint from falling back to an older closed wave. Statuses: ``closed``
+    (allow) · ``rail_degraded`` (a task-wide rail released the hold — allow) ·
+    ``advisory_open`` (advisory enforcement proceeds under loud disclosure) ·
+    ``cycles_exhausted`` (the shared cap is spent on an OPEN wave: finalization is
+    released so the task can terminalize honestly as blocked — owner D27 — while
+    the wave itself stays open) · ``open`` / ``unavailable`` / ``pending`` /
+    ``legacy_open_requires_resubmission`` (blocking hold) · ``absent``. Accepts a v2
+    state, a loaded v1 wrapper, or a raw v1 record (read-only projection)."""
+    policy = "blocking" if str(enforcement or "").lower() == "blocking" else "advisory"
+    control: Dict[str, Any] = {}
+    attempted = False
+    if isinstance(state, dict):
+        legacy = _legacy_projection_of(state)
+        attempt = state.get("current_attempt") if isinstance(state.get("current_attempt"), dict) else {}
+        wave = current_plan_review_wave(state) if state.get("schema_version") != 1 else None
+        if wave is not None or (attempt and state.get("schema_version") != 1):
+            attempted = True
+            outcome = str((wave or {}).get("aggregate") or "")
+            if wave is not None and bool(wave.get("closed")):
+                control = {"status": "closed", "outcome": outcome, "closed": True,
+                           "fingerprint": str(wave.get("request_fingerprint") or "")}
+            elif str(attempt.get("status") or "") == "rail_degraded":
+                control = {"status": "rail_degraded", "reason": str(attempt.get("reason") or ""),
+                           "outcome": outcome}
+            elif wave is not None:
+                control = {
+                    "status": "cycles_exhausted" if wave.get("cycles_exhausted") else "open",
+                    "outcome": outcome, "closed": False,
+                    "fingerprint": str(wave.get("request_fingerprint") or ""),
+                    "reviewer_slots_degraded": outcome == "DEGRADED",
+                }
+            else:
+                control = {"status": str(attempt.get("status") or "open"),
+                           "reason": str(attempt.get("reason") or "")}
+        elif legacy.get("status") not in (None, "", "absent"):
+            attempted = True
+            if legacy["status"] == "closed":
+                control = {"status": "closed", "outcome": legacy["outcome"], "closed": True,
+                           "fingerprint": legacy["fingerprint"], "legacy_v1": True}
+            elif legacy["status"] == "rail_degraded":
+                control = {"status": "rail_degraded", "reason": legacy["reason"],
+                           "outcome": legacy["outcome"], "legacy_v1": True}
+            elif legacy["status"] == "pending":
+                control = {"status": "pending", "legacy_v1": True}
+            else:
+                control = {"status": LEGACY_OPEN_STATUS, "outcome": legacy["outcome"],
+                           "closed": False, "fingerprint": legacy["fingerprint"], "legacy_v1": True,
+                           "reason": "an open v1 plan wave cannot be honored: re-call plan_task"}
+        elif state.get("waves"):
+            control = {"status": "pending"}
+        else:
+            control = {"status": "absent"}
+    else:
+        control = {"status": "invalid"}
+
+    status = str(control.get("status") or "unavailable")
+    closed = bool(control.get("closed"))
+    if status == "closed" and closed:
+        gate_status, allow = "closed", True
+    elif hard_rail or status == "rail_degraded":
+        gate_status, allow = "rail_degraded", True
+    elif policy == "advisory" and status in {
+        "open", "unavailable", "cycles_exhausted", LEGACY_OPEN_STATUS,
+    }:
+        gate_status, allow = "advisory_open", True
+    elif status == "cycles_exhausted":
+        gate_status, allow = "cycles_exhausted", True
+    else:
+        gate_status, allow = status, False
+    return {
+        "enforcement": policy,
+        "status": gate_status,
+        "allow": allow,
+        "attempted": attempted,
+        "outcome": str(control.get("outcome") or ""),
+        "closed": closed,
+        "reviewer_slots_degraded": bool(control.get("reviewer_slots_degraded")),
+        "reason": str(hard_rail or control.get("reason") or ""),
+        "cycles_paid": int((state or {}).get("cycles_paid") or 0) if isinstance(state, dict) else 0,
+        "legacy_v1": bool(control.get("legacy_v1")),
+        "source": "durable_state",
+    }
+
+
+def closed_plan_review_wave(state: Any) -> Optional[Dict[str, Any]]:
+    """The wave holding the CURRENT CLOSED plan authority, or None (pure read).
+
+    v2: the current wave when ``closed``. A v1 record with a closed current review
+    projects a minimal legacy wave (``{"acceptance_claims": [...], "legacy_v1": True}``)
+    so ``effective_acceptance_claims``' v1 fallback still binds those claims."""
+    if not isinstance(state, dict):
+        return None
+    if state.get("schema_version") != 1:
+        wave = current_plan_review_wave(state)
+        if wave is not None:
+            return wave if bool(wave.get("closed")) else None
+    legacy = _legacy_projection_of(state)
+    if legacy.get("status") == "closed":
+        return {"legacy_v1": True, "request_fingerprint": legacy["fingerprint"],
+                "aggregate": legacy["outcome"], "closed": True,
+                "acceptance_claims": list(legacy.get("acceptance_claims") or [])}
+    return None
+
+
+def record_plan_review_attempt(
+    results_drive_root: Any,
+    task_id: str,
+    *,
+    fingerprint: str,
+    status: str = "open",
+    reason: str = "",
+) -> Dict[str, Any]:
+    """Select one canonical plan fingerprint as current (open | unavailable | rail_degraded)."""
+    if not _PLAN_REVIEW_HASH_RE.fullmatch(str(fingerprint or "")):
+        raise ValueError("PLAN_REVIEW_STATE_INVALID: current attempt fingerprint is invalid")
+    if status not in _PLAN_REVIEW_ATTEMPT_STATUSES:
+        raise ValueError("PLAN_REVIEW_STATE_INVALID: current attempt status is invalid")
+
+    def _record(state: Dict[str, Any]) -> Dict[str, Any]:
+        state["current_attempt"] = {
+            "fingerprint": fingerprint,
+            "status": status,
+            "reason": str(reason or "")[:_PLAN_REVIEW_REASON_MAX_CHARS],
+        }
+        return state
+
+    return _update_plan_review_state(results_drive_root, task_id, _record)
+
+
+def mark_current_plan_review_unavailable(
+    results_drive_root: Any,
+    task_id: str,
+    *,
+    reason: str,
+) -> Dict[str, Any]:
+    """Mark the current fingerprint retryable-unavailable (a failed/timed-out panel)."""
+
+    def _mark(state: Dict[str, Any]) -> Dict[str, Any]:
+        current = state.get("current_attempt")
+        if isinstance(current, dict) and current.get("fingerprint"):
+            current["status"] = "unavailable"
+            current["reason"] = str(reason or "review_unavailable")[:_PLAN_REVIEW_REASON_MAX_CHARS]
+        return state
+
+    return _update_plan_review_state(results_drive_root, task_id, _mark)
+
+
+def _fit_plan_review_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Last resort (gate advisory, 39c3a195; W3 rounds 6-9): make the state persistable.
+
+    One maximal PAID wave can exceed the limit by itself — finding texts, locators,
+    disclosures, the normalized spec, the manifest rows, dispositions and the per-task
+    request memory are all bounded strings, and 10 slots x 32 findings x 600 four-byte
+    chars of each fill 1 MB many times over. A refused write would mean the panel was paid
+    and `cycles_paid` never advanced (the panel would be re-paid), or a closure / cap stamp
+    could not be recorded. So EVERY writer runs this: older full waves are compacted first
+    (the existing mechanism); then every free-text leaf of the newest wave is cut on shared
+    tiers with a visible marker while identity (ids, classes, breaks, hashes, fingerprints,
+    aggregate, the goal and the acceptance claims that bind task acceptance) is never
+    touched, and the wave is stamped ``spec_body_truncated`` when its frozen spec was cut
+    (its hashes then name the ORIGINAL body; the next cycle's spec delta is unavailable
+    and says so). A cut locator no longer resolves and the next packet names it as an
+    omission."""
+    def _size() -> int:
+        return len(json.dumps(state, ensure_ascii=False, default=str).encode("utf-8"))
+
+    # The fit target keeps headroom for the post-loop stamps (`spec_body_truncated`,
+    # `request_memory_truncated`) and a later one-key writer (`cycles_exhausted`), so a state
+    # that fits here still fits after them (delta review R10-2).
+    fit_limit = _PLAN_REVIEW_STATE_MAX_BYTES - 512
+
+    waves = list(state.get("waves") or [])
+    for index in range(len(waves) - 1):
+        if _size() <= fit_limit:
+            break
+        if not waves[index].get("compact"):
+            waves[index] = _compact_plan_review_wave(waves[index])
+            state["waves"] = waves
+    if waves and _size() > fit_limit:
+        newest = waves[-1]
+        wave_before = json.dumps(newest, sort_keys=True, ensure_ascii=False, default=str)
+        spec_before = json.dumps(newest.get("spec"), sort_keys=True, ensure_ascii=False, default=str)
+        for cut in _PLAN_REVIEW_TRUNCATION_TIERS:
+            _truncate_wave_texts(newest, cut)
+            memory = [str(x) for x in state.get("need_evidence_seen") or []]
+            if any(len(x) > cut for x in memory):
+                state["need_evidence_seen"] = sorted(
+                    {x[:cut] + _PLAN_REVIEW_TRUNCATION_MARKER if len(x) > cut else x for x in memory})
+                state["request_memory_truncated"] = True
+            if _size() <= fit_limit:
+                break
+        # The stamps are honest: set only for what the cut actually touched (delta review F10-2).
+        if json.dumps(newest, sort_keys=True, ensure_ascii=False, default=str) != wave_before:
+            newest["findings_texts_truncated"] = True
+        if json.dumps(newest.get("spec"), sort_keys=True, ensure_ascii=False, default=str) != spec_before:
+            newest["spec_body_truncated"] = True
+    return state
+
+
+def _update_plan_review_state(
+    results_drive_root: Any,
+    task_id: str,
+    mutator: Callable[[Dict[str, Any]], Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Strict locked update; unlike lifecycle writes, planning authority has no unlocked fallback."""
+    path = task_result_path(results_drive_root, task_id)
+
+    def _merge(existing: Dict[str, Any]) -> Dict[str, Any]:
+        state = _validated_plan_review_state(existing.get(PLAN_REVIEW_STATE_KEY))
+        state.pop("legacy_v1_projection", None)  # derived on load, never persisted
+        updated_state = _validated_plan_review_state(_fit_plan_review_state(mutator(state)))
+        updated_state.pop("legacy_v1_projection", None)
+        now = utc_now_iso()
+        return {
+            **existing,
+            PLAN_REVIEW_STATE_KEY: updated_state,
+            "task_id": task_id,
+            "status": str(existing.get("status") or STATUS_RUNNING),
+            "ts": str(existing.get("ts") or now),
+            "updated_at": now,
+        }
+
+    try:
+        updated = update_json_locked(path, _merge, strict_existing_dict=True)
+    except ValueError as exc:
+        if str(exc).startswith("update_json_locked:"):
+            raise ValueError(
+                "PLAN_REVIEW_STATE_INVALID: parent task result JSON is malformed"
+            ) from exc
+        raise
+    return _validated_plan_review_state(updated.get(PLAN_REVIEW_STATE_KEY))
+
+
+def _compact_plan_review_wave(wave: Dict[str, Any]) -> Dict[str, Any]:
+    """Bounded summary of an older wave (S2): identity, outcome, counts, closure."""
+    findings = wave.get("findings") if isinstance(wave.get("findings"), list) else []
+    return {
+        "compact": True,
+        "cycle_index": wave.get("cycle_index"),
+        "request_fingerprint": str(wave.get("request_fingerprint") or ""),
+        "aggregate": str(wave.get("aggregate") or ""),
+        "counts": {
+            "findings": len(findings),
+            "dispositions": len(wave.get("dispositions") or []),
+            "blocking": sum(1 for f in findings if isinstance(f, dict) and f.get("class") == "blocking"),
+        },
+        "closed": bool(wave.get("closed")),
+        "paid": bool(wave.get("paid")),
+    }
+
+
+_PLAN_REVIEW_TRUNCATION_MARKER = "…[truncated to fit the durable state]"
+_PLAN_REVIEW_TRUNCATION_TIERS = (600, 200, 80, 40)
+# Identity-bearing keys the last-resort cut never touches (authority, not prose).
+_PLAN_REVIEW_IDENTITY_KEYS = frozenset({
+    "id", "finding_id", "slot", "slot_id", "class", "breaks", "aggregate", "request_fingerprint",
+    "previous_fingerprint", "spec_hash", "evidence_manifest_hash", "plan_prose_hash", "sha256",
+    "model", "request_model", "route", "host_file_read_attestation", "reason", "decision", "kind",
+    "goal", "acceptance_claims", "cycle_index", "series_id", "schema_version",
+})
+
+
+def _truncate_wave_texts(node: Any, cut: int, *, key: str = "") -> Any:
+    """Cut every free-text string leaf under ``node`` to ``cut`` chars (marker appended), in
+    place for containers; identity keys are left whole. Returns the (possibly new) leaf."""
+    if isinstance(node, dict):
+        for k, v in list(node.items()):
+            if k in _PLAN_REVIEW_IDENTITY_KEYS:
+                continue
+            node[k] = _truncate_wave_texts(v, cut, key=k)
+        return node
+    if isinstance(node, list):
+        for i, v in enumerate(node):
+            node[i] = _truncate_wave_texts(v, cut, key=key)
+        return node
+    if isinstance(node, str) and len(node) > cut and not node.endswith(_PLAN_REVIEW_TRUNCATION_MARKER):
+        return node[:cut] + _PLAN_REVIEW_TRUNCATION_MARKER
+    if isinstance(node, str) and node.endswith(_PLAN_REVIEW_TRUNCATION_MARKER):
+        body = node[: -len(_PLAN_REVIEW_TRUNCATION_MARKER)]
+        return (body[:cut] + _PLAN_REVIEW_TRUNCATION_MARKER) if len(body) > cut else node
+    return node
+
+
+def record_plan_review_wave(
+    results_drive_root: Any,
+    task_id: str,
+    wave: Dict[str, Any],
+    *,
+    need_evidence_seen: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Append one reviewed v2 wave, make it current, pay its cycle, bound the history.
+
+    ``wave["paid"]`` decides whether ``cycles_paid`` advances (a DEGRADED wave never
+    pays); ``need_evidence_seen`` replaces the task-level locator memory; the first v2
+    wave of a task mints ``series_id`` (a fresh series supersedes any open v1 record).
+    Older waves compact to summaries beyond ``_PLAN_REVIEW_FULL_WAVES``; entries beyond
+    ``_PLAN_REVIEW_MAX_WAVES`` are dropped with ``waves_omitted`` counting them (S2)."""
+    fingerprint = str(wave.get("request_fingerprint") or "")
+    if not _PLAN_REVIEW_HASH_RE.fullmatch(fingerprint):
+        raise ValueError("PLAN_REVIEW_STATE_INVALID: wave fingerprint is invalid")
+
+    def _record(state: Dict[str, Any]) -> Dict[str, Any]:
+        previous = [w for w in state.get("waves") or [] if str(w.get("request_fingerprint") or "") == fingerprint]
+        # D2 (delta review): an UNPAID (DEGRADED) wave never erases a PAID predecessor with
+        # the same fingerprint — that predecessor holds the findings and rejections the
+        # promised delta cycle rides on. The degraded attempt is counted on the paid wave
+        # and the paid wave stays the durable authority; the caller still renders the
+        # degraded result it was handed.
+        if not wave.get("paid") and any(w.get("paid") for w in previous):
+            for w in state.get("waves") or []:
+                if str(w.get("request_fingerprint") or "") == fingerprint and w.get("paid"):
+                    w["degraded_retries"] = int(w.get("degraded_retries") or 0) + 1
+            state["current_attempt"] = {"fingerprint": fingerprint, "status": "open", "reason": ""}
+            if need_evidence_seen is not None:
+                state["need_evidence_seen"] = sorted({str(s) for s in need_evidence_seen if str(s)})
+            return state
+        waves = [w for w in state.get("waves") or [] if str(w.get("request_fingerprint") or "") != fingerprint]
+        waves.append(copy.deepcopy(wave))
+        if not state.get("series_id"):
+            state["series_id"] = fingerprint[:16]
+        # C-07: the cap counts PAID CYCLES, not writes. Two concurrent identical calls
+        # (agent + operator script) each dispatch a panel, but the second write replaces
+        # the first wave and must not charge a second cycle — UNLESS it is the earned
+        # delta cycle of a fully-rejected wave, which advances cycle_index and is a new
+        # paid panel by design (final-gate finding, 4e133c8a).
+        already_paid = any(
+            w.get("paid") and int(w.get("cycle_index") or 0) >= int(wave.get("cycle_index") or 0)
+            for w in previous
+        )
+        if wave.get("paid") and not already_paid:
+            state["cycles_paid"] = int(state.get("cycles_paid") or 0) + 1
+        if need_evidence_seen is not None:
+            state["need_evidence_seen"] = sorted({str(s) for s in need_evidence_seen if str(s)})
+        full_from = max(0, len(waves) - _PLAN_REVIEW_FULL_WAVES)
+        waves = [
+            (_compact_plan_review_wave(w) if idx < full_from and not w.get("compact") else w)
+            for idx, w in enumerate(waves)
+        ]
+        overflow = max(0, len(waves) - _PLAN_REVIEW_MAX_WAVES)
+        if overflow:
+            state["waves_omitted"] = int(state.get("waves_omitted") or 0) + overflow
+            waves = waves[overflow:]
+        # I-02: size-fitting (older-wave compaction, then the last-resort text cut) runs for
+        # EVERY writer in `_update_plan_review_state` → `_fit_plan_review_state`.
+        state["waves"] = waves
+        state["current_attempt"] = {"fingerprint": fingerprint, "status": "open", "reason": ""}
+        return state
+
+    state = _update_plan_review_state(results_drive_root, task_id, _record)
+    return plan_review_wave(state, fingerprint) or {}
+
+
+def record_plan_review_dispositions(
+    results_drive_root: Any,
+    task_id: str,
+    *,
+    fingerprint: str,
+    dispositions: List[Dict[str, Any]],
+    closed: bool,
+    closure_notes: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Store the agent's dispositions on one FULL wave and its resulting closure.
+
+    A wave that is already closed is immutable (``PLAN_REVIEW_DISPOSITION_IMMUTABLE``);
+    a GREEN/REVISE_PLAN/DEGRADED wave never becomes closed here (the closure table in
+    ``plan_spec.closure_after_disposition`` is the caller's authority)."""
+
+    def _record(state: Dict[str, Any]) -> Dict[str, Any]:
+        wave = next((w for w in state["waves"] if str(w.get("request_fingerprint") or "") == fingerprint), None)
+        if wave is None or wave.get("compact"):
+            raise ValueError("PLAN_REVIEW_DISPOSITION_UNBINDABLE: no full wave holds this fingerprint")
+        if wave.get("closed"):
+            raise ValueError("PLAN_REVIEW_DISPOSITION_IMMUTABLE: a closed wave cannot be changed")
+        wave["dispositions"] = copy.deepcopy(list(dispositions))
+        wave["disposition_recorded_at"] = utc_now_iso()
+        if closure_notes is not None:
+            wave["closure_notes"] = list(closure_notes)
+        if closed and str(wave.get("aggregate") or "") == "REVIEW_REQUIRED":
+            wave["closed"] = True
+        state["current_attempt"] = {"fingerprint": fingerprint, "status": "open", "reason": ""}
+        return state
+
+    state = _update_plan_review_state(results_drive_root, task_id, _record)
+    return plan_review_wave(state, fingerprint) or {}
+
+
+def mark_plan_review_cycles_exhausted(
+    results_drive_root: Any, task_id: str, *, fingerprint: str,
+) -> Dict[str, Any]:
+    """Stamp the current open wave ``cycles_exhausted`` (typed hold state; no panel ran)."""
+
+    def _mark(state: Dict[str, Any]) -> Dict[str, Any]:
+        wave = next((w for w in state["waves"] if str(w.get("request_fingerprint") or "") == fingerprint), None)
+        if wave is not None and not wave.get("closed"):
+            wave["cycles_exhausted"] = True
+        return state
+
+    state = _update_plan_review_state(results_drive_root, task_id, _mark)
+    return plan_review_wave(state, fingerprint) or {}
+
+
+
+def fail_tasks(results_drive_root: Any, tasks: Any, *, reason_code: str, result: str) -> int:
+    """Terminally FAIL a batch of queued tasks (e.g. on budget exhaustion) so their
+    waiters get an observable result instead of hanging. Returns the count written."""
+    written = 0
+    for task in tasks or []:
+        tid = str((task or {}).get("id") or "")
+        if not tid:
+            continue
+        # Write to the task's CANONICAL status root: forked/workspace/subagent children
+        # use budget_drive_root, so the waiter reading THAT root sees the result (a child
+        # outside results_drive_root would otherwise keep hanging — the bug this fixes).
+        root = (task or {}).get("budget_drive_root") or results_drive_root
+        # The cancel-intent PROJECTION lives at the canonical supervisor data root
+        # (every ingress writes it through queue.DRIVE_ROOT == results_drive_root),
+        # never at a child's budget_drive_root (GR3-11b) — resolving intents at the
+        # child root would miss every intent for a split-drive child.
+        intent_root = results_drive_root
+        try:
+            # Honor pending cancel intent: terminalize as CANCELLED (the right reason),
+            # not as budget_exhausted — the budget drain must not relabel a cancellation.
+            # Both carriers are consulted: the durable intent projection (the live
+            # authority) and the legacy ``cancel_requested`` status latch (old files).
+            existing = load_task_result(root, tid) or {}
+            legacy_latch = str(existing.get("status") or "") == STATUS_CANCEL_REQUESTED
+            has_intent = False
+            if not legacy_latch:
+                try:
+                    from ouroboros.cancel_intents import has_active_intent
+
+                    has_intent = has_active_intent(intent_root, tid)
+                except Exception:
+                    has_intent = False
+            if legacy_latch or has_intent:
+                # AR2-2 settle-owner unity: CLAIM before settle, the same fence
+                # custody holds. A refused claim (or one that cannot be read)
+                # means a live custody owns this teardown — skip the task; that
+                # owner writes the terminal, settles, and emits its task_done.
+                claim: Dict[str, Any] = {}
+                if has_intent:
+                    try:
+                        from ouroboros.cancel_intents import claim_intent
+
+                        claim = claim_intent(intent_root, tid, owner="fail_tasks") or {}
+                    except Exception:
+                        claim = {"claim_refused": True}
+                    if claim.get("claim_refused"):
+                        continue
+                try:
+                    stored = write_task_result(
+                        root, tid, STATUS_CANCELLED, result="Cancelled before start.",
+                    ) or {}
+                except Exception:
+                    # Nothing durable happened: release the claim so the watchdog
+                    # re-feeds custody instead of waiting out a dead claim.
+                    if claim.get("request_id"):
+                        try:
+                            from ouroboros.cancel_intents import release_claim
+
+                            release_claim(
+                                intent_root, tid, error="budget-drain cancel persistence failed",
+                                expected_generation=claim.get("generation"),
+                                request_id=str(claim.get("request_id") or ""),
+                            )
+                        except Exception:
+                            log.debug("fail_tasks: claim release failed for %s", tid, exc_info=True)
+                    raise
+                try:
+                    from ouroboros.cancel_intents import settle_intent
+
+                    stored_status = str(stored.get("status") or STATUS_CANCELLED)
+                    # Fenced by this drain's OWN claim (no-op + forensic row on a
+                    # mismatch); the stored status decides the honest outcome. A
+                    # scope=cascade intent is refused atomically inside the settle
+                    # (GR3-1: the cascade postcondition is its only settle owner)
+                    # and this drain's claim is auto-released in the same write.
+                    settle_intent(
+                        intent_root, tid,
+                        outcome=("cancelled" if stored_status == STATUS_CANCELLED
+                                 else "already_settled"),
+                        detail=("budget drain before start" if stored_status == STATUS_CANCELLED
+                                else stored_status),
+                        expected_generation=claim.get("generation"),
+                        request_id=str(claim.get("request_id") or ""),
+                    )
+                except Exception:
+                    log.debug("fail_tasks: intent settle failed for %s", tid, exc_info=True)
+            else:
+                write_task_result(root, tid, STATUS_FAILED, reason_code=reason_code, result=result)
+            written += 1
+        except Exception:
+            log.debug("fail_tasks: could not fail %s", tid, exc_info=True)
+    return written

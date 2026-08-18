@@ -10,6 +10,49 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+class BudgetManager:
+    """Cost-aware orchestration that prefers local/free model capacity before paid providers."""
+
+    def __init__(self):
+        self.enabled = str(os.getenv("AURION_BUDGET_MANAGER", "true")).strip().lower() not in ("0", "false", "off")
+        self.base_order = [
+            "custom_local",
+            "ollama",
+            "sillytavern",
+            "oobabooga",
+            "openrouter",
+            "gemini",
+            "m365copilot",
+            "cohere",
+            "openai",
+            "anthropic",
+        ]
+        self.priority = self._resolve_priority()
+
+    def _resolve_priority(self):
+        env_value = str(os.getenv("AURION_PROVIDER_PRIORITY", "")).strip()
+        ordered = []
+        if env_value:
+            for part in re.split(r"[,;\n]+", env_value):
+                provider = str(part or "").strip().lower()
+                if provider and provider not in ordered:
+                    ordered.append(provider)
+        for provider in self.base_order:
+            if provider not in ordered:
+                ordered.append(provider)
+        return ordered
+
+    def ordered_providers(self):
+        return list(self.priority) if self.enabled else list(self.base_order)
+
+    def summarise(self):
+        return {
+            "enabled": self.enabled,
+            "provider_priority": self.ordered_providers(),
+            "cost_mode": "free_first" if self.enabled else "legacy",
+            "preferred_free_capacity": ["custom_local", "ollama", "sillytavern", "oobabooga", "openrouter"],
+        }
+
 class _CohereClientAdapter:
     """Adapts a cohere.Client to look like an OpenAI-chat-style client so existing call sites work."""
     def __init__(self, cohere_client):
@@ -63,6 +106,7 @@ class PersonalityEngine:
         except OSError:
             self.nlp = None
 
+        self.budget_manager = BudgetManager()
         self.llm_provider = "none"
         self.custom_model_aliases = {}  # populated at runtime by web_ui when custom models are loaded
         self.llm_clients = {}  # provider -> initialized client
@@ -78,6 +122,13 @@ class PersonalityEngine:
         self.cot_model = str(os.getenv("AURION_COT_MODEL", "")).strip()  # optional separate model for CoT
         self.llm_client = self._init_llm()
         self.use_llm = self.llm_client is not None
+        # ── Aurion Brain (Ouroboros + OpenMythos + Quantum layer) ─────────────
+        try:
+            from joi_companion.core.aurion_brain import get_brain
+            self.aurion_brain = get_brain()
+            self.aurion_brain.initialize()
+        except Exception:
+            self.aurion_brain = None
         self.always_recall_mode = str(os.getenv("AURION_ALWAYS_RECALL_MODE", "true")).strip().lower() == "true"
         self.recall_personal_chars = max(1200, int(os.getenv("AURION_RECALL_PERSONAL_CHARS", "3200")))
         self.recall_global_chars = max(2200, int(os.getenv("AURION_RECALL_GLOBAL_CHARS", "12000")))
@@ -217,6 +268,10 @@ class PersonalityEngine:
             return None
 
     def _provider_order(self):
+        if getattr(self, "budget_manager", None):
+            ordered = self.budget_manager.ordered_providers()
+            if ordered:
+                return ordered
         return ["ollama", "sillytavern", "oobabooga", "openrouter", "cohere", "openai", "anthropic", "gemini", "m365copilot"]
 
     def _build_provider_client(self, provider, verify=True):
@@ -246,6 +301,15 @@ class PersonalityEngine:
                 if verify:
                     client.models.list()
                 return client
+            if provider in {"custom_local", "self_hosted", "user_local"}:
+                import openai, httpx
+                key = str(os.getenv("AURION_CUSTOM_LOCAL_API_KEY", os.getenv("OPENAI_API_KEY", ""))).strip()
+                url = str(os.getenv("AURION_CUSTOM_LOCAL_BASE_URL", "")).strip()
+                if not url:
+                    return None
+                if not key:
+                    key = "local"
+                return openai.OpenAI(api_key=key, base_url=url, timeout=httpx.Timeout(60.0))
             if provider == "openrouter":
                 import openai
                 key = str(os.getenv("OPENROUTER_API_KEY", "")).strip()
@@ -438,6 +502,31 @@ class PersonalityEngine:
             "nous-hermes3": "hf.co/NousResearch/Hermes-3-Llama-3.1-8B-GGUF",
             "hermes-3-llama-3.1": "hf.co/NousResearch/Hermes-3-Llama-3.1-8B-GGUF",
             "hf.co/nousresearch/hermes-3-llama-3.1-8b-gguf": "hf.co/NousResearch/Hermes-3-Llama-3.1-8B-GGUF",
+            # ── Gemma 4 (Google AI Studio API — free tier) ────────────────────
+            "gemma4-26b": "gemma-4-26b-a4b-it",
+            "gemma-4-26b": "gemma-4-26b-a4b-it",
+            "gemma4": "gemma-4-26b-a4b-it",
+            "gemma-4-26b-a4b-it": "gemma-4-26b-a4b-it",
+            "gemma4-31b": "gemma-4-31b-it",
+            "gemma-4-31b": "gemma-4-31b-it",
+            "gemma-4-31b-it": "gemma-4-31b-it",
+            # ── Gemma 3 local GGUF (via Ollama gemma_modelfile) ───────────────
+            "gemma3-voice": "gemma3-voice",
+            "gemma3-12b": "gemma3-voice",
+            "gemma-3-12b-voice": "gemma3-voice",
+            # ── Gemini free models (Google AI Studio) ─────────────────────────
+            "gemini-flash": "gemini-3-flash-preview",
+            "gemini3-flash": "gemini-3-flash-preview",
+            "gemini-3-flash": "gemini-3-flash-preview",
+            "gemini-3-flash-preview": "gemini-3-flash-preview",
+            "gemini3-pro": "gemini-3.1-pro-preview",
+            "gemini-3.1-pro": "gemini-3.1-pro-preview",
+            "gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
+            # ── Aurion brain (Ouroboros + OpenMythos + Quantum) ───────────────
+            "aurion-brain": "ouroboros",
+            "ouroboros": "ouroboros",
+            "openmythos": "ouroboros",
+            "quantum": "ouroboros",
         }
         return aliases.get(alias, str(model_name).strip())
 
@@ -458,7 +547,7 @@ class PersonalityEngine:
             "qwen/qwen-2.5-7b-instruct", "qwen/qwen-2.5-72b-instruct",
         }
         cohere_default = str(os.getenv("AURION_COHERE_MODEL", "command-a-03-2025")).strip() or "command-a-03-2025"
-        gemini_default = str(os.getenv("AURION_GEMINI_MODEL", "gemini-2.0-flash")).strip() or "gemini-2.0-flash"
+        gemini_default = str(os.getenv("AURION_GEMINI_MODEL", "gemini-3-flash-preview")).strip() or "gemini-3-flash-preview"
         m365_default = str(os.getenv("AURION_M365_COPILOT_MODEL", "gpt-4o-mini")).strip() or "gpt-4o-mini"
         COHERE_MODELS = {"command-a-03-2025", "command-a", "command-r-plus", "command-r-plus-08-2024", "command-r", "command-r-08-2024"}
         openrouter_default = str(os.getenv("AURION_OPENROUTER_MODEL", "openrouter/auto")).strip() or "openrouter/auto"

@@ -1,0 +1,11 @@
+{
+  "name": "ouroboros-web",
+  "version": "6.103.0",
+  "private": true,
+  "type": "module",
+  "description": "Ouroboros browser UI package boundary",
+  "scripts": {
+    "lint": "node --check app.js",
+    "test": "node --test tests/*.test.js"
+  }
+}

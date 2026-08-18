@@ -1,0 +1,182 @@
+import './api_types.js';
+
+/**
+ * Single browser-side gateway client. Keep backend calls here so UI modules
+ * depend on named boundary helpers rather than raw transport details.
+ */
+export async function apiFetch(url, init = {}) {
+    return fetch(url, init);
+}
+
+export async function fetchJson(url, init = {}, options = {}) {
+    const response = await apiFetch(url, init);
+    let data = null;
+    try {
+        data = await response.json();
+    } catch {
+        data = { error: `non-json response (HTTP ${response.status})` };
+    }
+    if (!response.ok || (options.rejectOkFalse && data && data.ok === false)) {
+        const message = (data && (data.error || data.message)) || `HTTP ${response.status}`;
+        const error = new Error(message);
+        error.status = response.status;
+        error.body = data;
+        error.payload = data;
+        throw error;
+    }
+    return data;
+}
+
+export function jsonPost(url, payload = {}, options = {}) {
+    return fetchJson(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    }, options);
+}
+
+/**
+ * Cancel a task. With {cascade:true} the server also cancels the task's live
+ * subtree and answers only once that teardown has finished; without it the
+ * request stays the synchronous single-task cancel (no body — headless compat).
+ * S3 (Q1/Q2): stopPolicy "finalize_then_cancel" requests the soft
+ * finalize-then-stop episode (202 acknowledgement, cancel_state "pending");
+ * "immediate" (or absent) keeps today's hard cancel byte-identical.
+ * Shared by the Chat live-card stop control and the Activity tab.
+ * @param {string} taskId
+ * @param {{cascade?: boolean, stopPolicy?: string}} [options]
+ * @returns {Promise<import('./api_types.js').TaskCancelResponse>}
+ */
+export function cancelTask(taskId, { cascade = false, stopPolicy = '' } = {}) {
+    const url = `/api/tasks/${encodeURIComponent(taskId)}/cancel`;
+    const policy = String(stopPolicy || '');
+    const body = {
+        ...(cascade ? { cascade: true } : {}),
+        ...(policy && policy !== 'immediate' ? { stop_policy: policy } : {}),
+    };
+    return Object.keys(body).length ? jsonPost(url, body) : fetchJson(url, { method: 'POST' });
+}
+
+/**
+ * Owner hurry (S3, HQ1): the text-free typed task-local acceleration control.
+ * The body carries ONLY the client-generated stable request_id (reuse the same
+ * id on retry — the acknowledgement is idempotent). This path never creates a
+ * chat message anywhere; the durable facts are the typed owner-mailbox control
+ * and the owner_hurry task-result projection.
+ * @param {string} taskId
+ * @param {string} requestId
+ * @returns {Promise<import('./api_types.js').TaskHurryResponse>}
+ */
+export function hurryTask(taskId, requestId) {
+    return jsonPost(
+        `/api/tasks/${encodeURIComponent(taskId)}/hurry`,
+        { request_id: String(requestId || '') },
+        { rejectOkFalse: true },
+    );
+}
+
+/**
+ * Fetch one task's durable detail record, or null when unreachable — the
+ * shared reconcile read used by the cancel/stop card flows.
+ * @param {string} taskId
+ * @returns {Promise<import('./api_types.js').TaskDetailResponse|null>}
+ */
+export async function fetchTaskDetail(taskId) {
+    const resp = await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}`);
+    return (resp && typeof resp.json === 'function' && resp.ok !== false) ? resp.json() : null;
+}
+
+export function cleanExtensionRoute(value) {
+    const route = String(value || '').trim().replace(/^\/+/, '');
+    const parts = route.split('/').filter(Boolean);
+    if (!route || route.includes('\\') || parts.some((part) => part === '.' || part === '..')) {
+        return '';
+    }
+    return parts.map(encodeURIComponent).join('/');
+}
+
+export function extensionRoutePrefix(skill) {
+    return `/api/extensions/${encodeURIComponent(skill)}/`;
+}
+
+export function extensionRoutePath(skill, route, params = null) {
+    const cleanRoute = cleanExtensionRoute(route);
+    if (!cleanRoute) return '';
+    const query = params instanceof URLSearchParams && String(params) ? `?${params}` : '';
+    return `${extensionRoutePrefix(skill)}${cleanRoute}${query}`;
+}
+
+export function updateStrategyForPlan(plan = {}) {
+    if (!plan.available) return '';
+    const kind = String(plan.kind || '');
+    if (!['clean', 'conflicting'].includes(kind)) return '';
+    return kind === 'clean' ? 'auto_merge' : 'assisted';
+}
+
+export const apiClient = {
+    /** @returns {Promise<import('./api_types.js').HealthResponse>} */
+    health: () => fetchJson('/api/health', { cache: 'no-store' }),
+    /** @returns {Promise<import('./api_types.js').StateResponse>} */
+    state: () => fetchJson('/api/state', { cache: 'no-store' }),
+    settings: () => fetchJson('/api/settings', { cache: 'no-store' }),
+    /** @returns {Promise<import('./api_types.js').UiPreferencesResponse>} */
+    uiPreferences: () => fetchJson('/api/ui/preferences', { cache: 'no-store' }),
+    saveUiPreferences: (payload) => jsonPost('/api/ui/preferences', payload),
+    saveSettings: (payload) => fetchJson('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    }),
+    /**
+     * Finish first-run onboarding in ONE atomic owner-scoped save (D-8):
+     * settings + runtime mode + safety default + the completion fact land
+     * together, or nothing does. The install-time agent preset and its marker
+     * ride the same write only when the response says `preset.applied` —
+     * `not_requested`, `skipped_by_owner` and `not_install_time` are ordinary
+     * successes that persist no preset.
+     * @param {import('./api_types.js').OnboardingCompleteRequest} payload
+     * @returns {Promise<import('./api_types.js').OnboardingCompleteResponse>}
+     */
+    completeOnboarding: (payload) => jsonPost('/api/onboarding/complete', payload),
+    ownerRuntimeMode: (mode) => jsonPost('/api/owner/runtime-mode', { mode }),
+    ownerAutoGrant: (enabled) => jsonPost('/api/owner/auto-grant', { enabled: Boolean(enabled) }),
+    ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }),
+    /** @returns {Promise<import('./api_types.js').OwnerScopeReviewFloorResponse>} */
+    // DEPRECATED (v6.80.0): the value is stored but nothing consults it — BIBLE P3
+    // scope-review applicability follows the owner context mode. Kept as a frozen
+    // contract surface; the response carries an explicit deprecation notice.
+    ownerScopeReviewFloor: (floor) => jsonPost('/api/owner/scope-review-floor', { floor }),
+    /** @returns {Promise<import('./api_types.js').OwnerSafetyModeResponse>} */
+    ownerSafetyMode: (mode) => jsonPost('/api/owner/safety-mode', { mode }),
+    logsTail: (name, limit = 2000) => fetchJson(`/api/logs/${encodeURIComponent(name)}?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' }),
+    ownerCapabilityAck: (payload) => jsonPost('/api/owner/capability-ack', payload),
+    /** @returns {Promise<import('./api_types.js').OpenAICompatibleModelsResponse>} */
+    openAICompatibleModels: (payload) => jsonPost('/api/openai-compatible/models', payload),
+    extensions: () => fetchJson('/api/extensions', { cache: 'no-store' }),
+    skillLifecycleQueue: () => fetchJson('/api/skills/lifecycle-queue', { cache: 'no-store' }),
+    /** @returns {Promise<import('./api_types.js').SkillDeleteResponse>} */
+    deleteSkill: (skill, payloadRoot) => jsonPost(`/api/skills/${encodeURIComponent(skill)}/delete`, {
+        payload_root: payloadRoot,
+    }),
+    skillGrants: (skill, items) => jsonPost(`/api/skills/${encodeURIComponent(skill)}/grants`, { items }),
+    chatHistory: (limit = 1000) => fetchJson(`/api/chat/history?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' }),
+    projectFromTask: (taskId, id, name, objectiveHint = '') => jsonPost('/api/projects/from-task', { task_id: taskId, id, name, objective_hint: objectiveHint }),
+    /** @param {import('./api_types.js').ProjectCreateRequest} payload */
+    projectCreate: (payload) => jsonPost('/api/projects', payload),
+    projectUpdate: (projectId, name) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/update`, { name }),
+    /** @returns {Promise<import('./api_types.js').ProjectDeleteResponse>} */
+    projectDelete: (projectId) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/delete`, {}),
+    /** @returns {Promise<import('./api_types.js').FsDirsResponse>} */
+    fsDirs: (path = '') => fetchJson(`/api/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
+    updateStatus: () => fetchJson('/api/update/status', { cache: 'no-store' }),
+    updateCheck: () => jsonPost('/api/update/check', {}),
+    /** @returns {Promise<import('./api_types.js').UpdatePreflightResponse>} */
+    updatePreflight: () => jsonPost('/api/update/preflight', {}),
+    /** @returns {Promise<import('./api_types.js').UpdateApplySuccessResponse>} */
+    updateApply: (strategy, plan = {}, { confirmRecovery = false } = {}) => jsonPost('/api/update/apply', {
+        strategy,
+        expected_base_sha: String(plan.base_sha || ''),
+        expected_target_sha: String(plan.target_sha || ''),
+        ...(confirmRecovery ? { confirm_recovery: true } : {}),
+    }),
+};

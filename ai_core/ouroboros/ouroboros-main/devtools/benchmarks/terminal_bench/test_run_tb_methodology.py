@@ -1,0 +1,398 @@
+"""Focused tests for the leaderboard-faithfulness invariants of run_tb.py.
+
+Run explicitly (it lives under devtools, not tests/, to stay merge-clean):
+    PYTHONPATH=<repo> python -m pytest devtools/benchmarks/terminal_bench/test_run_tb_methodology.py
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import subprocess
+
+import pytest
+
+from devtools.benchmarks.terminal_bench import run_tb
+
+
+# --- validate_methodology gates -------------------------------------------------
+
+def test_k_below_5_raises_without_allow():
+    with pytest.raises(ValueError):
+        run_tb.validate_methodology(k=1, timeout_multiplier=1.0, resource_overrides=[])
+
+
+def test_k_below_5_allowed_with_flag():
+    run_tb.validate_methodology(k=1, timeout_multiplier=1.0, resource_overrides=[], allow_low_k=True)
+
+
+def test_setup_build_multiplier_raises_without_allow():
+    with pytest.raises(ValueError):
+        run_tb.validate_methodology(k=5, timeout_multiplier=1.0, resource_overrides=[], setup_timeout_multiplier=4.0)
+    with pytest.raises(ValueError):
+        run_tb.validate_methodology(k=5, timeout_multiplier=1.0, resource_overrides=[], build_timeout_multiplier=4.0)
+
+
+def test_setup_build_multiplier_allowed_with_flag():
+    run_tb.validate_methodology(
+        k=5, timeout_multiplier=1.0, resource_overrides=[],
+        setup_timeout_multiplier=4.0, build_timeout_multiplier=4.0, allow_setup_build_multipliers=True,
+    )
+
+
+# --- harbor_command output ------------------------------------------------------
+
+def _cfg(**over):
+    base = dict(
+        dataset="terminal-bench/terminal-bench-2-1", model="google/gemini-3.5-flash", k=5,
+        jobs_dir=pathlib.Path("/tmp/jd"), harbor_bin="harbor", n_concurrent=1, task_filters=[],
+        settings_path=pathlib.Path("/tmp/s.json"), execute=False, light_model="google/gemini-3.5-flash",
+    )
+    base.update(over)
+    return run_tb.HarborCommandConfig(**base)
+
+
+def test_faithful_command_omits_multiplier_flags_and_gates_web(tmp_path):
+    cmd = run_tb.harbor_command(_cfg(jobs_dir=tmp_path))
+    assert "--agent-setup-timeout-multiplier" not in cmd
+    assert "--environment-build-timeout-multiplier" not in cmd
+    config = json.loads((tmp_path / "agent_job_config.json").read_text(encoding="utf-8"))
+    assert config["agents"][0]["kwargs"]["disable_agent_web"] is True
+
+
+def test_local_override_emits_multiplier_flags():
+    cmd = run_tb.harbor_command(_cfg(setup_timeout_multiplier=4.0, build_timeout_multiplier=2.0))
+    assert "--agent-setup-timeout-multiplier" in cmd and "4.0" in cmd
+    assert "--environment-build-timeout-multiplier" in cmd and "2.0" in cmd
+
+
+def test_allow_agent_web_flips_kwarg(tmp_path):
+    run_tb.harbor_command(_cfg(jobs_dir=tmp_path, disable_agent_web=False))
+    config = json.loads((tmp_path / "agent_job_config.json").read_text(encoding="utf-8"))
+    assert config["agents"][0]["kwargs"]["disable_agent_web"] is False
+
+
+def test_pip_cache_mount_is_env_opt_in(monkeypatch, tmp_path):
+    monkeypatch.delenv("OBO_TB_PIP_CACHE", raising=False)
+    assert "--mounts" not in run_tb.harbor_command(_cfg())
+
+    cache = tmp_path / "pip-cache"
+    monkeypatch.setenv("OBO_TB_PIP_CACHE", str(cache))
+    cmd = run_tb.harbor_command(_cfg())
+    idx = cmd.index("--mounts")
+    mounts = json.loads(cmd[idx + 1])
+    assert mounts == [{"type": "bind", "source": str(cache), "target": "/opt/ouro-pip-cache"}]
+    assert cache.is_dir()
+
+
+def test_pip_cache_mount_rejects_repo_path(monkeypatch):
+    repo = pathlib.Path(run_tb.__file__).resolve().parents[3]
+    monkeypatch.setenv("OBO_TB_PIP_CACHE", str(repo / ".bad-pip-cache"))
+    with pytest.raises(ValueError, match="must not be under repo"):
+        run_tb.harbor_command(_cfg())
+
+
+# --- apply_all_model + metadata -------------------------------------------------
+
+def test_apply_all_model_sets_forwarded_slots(monkeypatch):
+    for key in run_tb._ALL_MODEL_SLOT_KEYS + ("OUROBOROS_REVIEW_MODELS",):
+        monkeypatch.delenv(key, raising=False)
+    run_tb.apply_all_model("google/gemini-3.5-flash")
+    import os
+    for key in run_tb._ALL_MODEL_SLOT_KEYS:
+        assert os.environ[key] == "google/gemini-3.5-flash"
+    # Single-model run defaults to ONE reviewer at low effort (3 identical = monoculture, no diversity).
+    assert os.environ["OUROBOROS_REVIEW_MODELS"] == "google/gemini-3.5-flash"
+    assert os.environ["OUROBOROS_EFFORT_REVIEW"] == "low"
+    assert os.environ["OUROBOROS_EFFORT_SCOPE_REVIEW"] == "low"
+    assert "CLAUDE_CODE_MODEL" in run_tb._ALL_MODEL_SLOT_KEYS  # claude_code_edit cannot leak a different model
+    # Configurable: the 3-identical-reviewer / medium-effort path is still available.
+    run_tb.apply_all_model("google/gemini-3.5-flash", review_slots=3, review_effort="medium")
+    assert os.environ["OUROBOROS_REVIEW_MODELS"] == "google/gemini-3.5-flash,google/gemini-3.5-flash,google/gemini-3.5-flash"
+    assert os.environ["OUROBOROS_EFFORT_REVIEW"] == "medium"
+
+
+def test_metadata_omits_web_search_when_web_disabled(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_MODEL", "openai/gpt-5.2")
+    roles_on = dict(run_tb._effective_helper_models("google/gemini-3.5-flash", "google/gemini-3.5-flash", disable_agent_web=False))
+    roles_off = dict(run_tb._effective_helper_models("google/gemini-3.5-flash", "google/gemini-3.5-flash", disable_agent_web=True))
+    assert any("web_search" in r for r in roles_on.values())
+    assert not any("web_search" in r for r in roles_off.values())
+
+
+def test_metadata_declares_claude_code_and_dedupes_in_single_model(monkeypatch):
+    monkeypatch.delenv("OUROBOROS_WEBSEARCH_MODEL", raising=False)
+    # ensemble: a different Claude Code model is declared honestly
+    monkeypatch.setenv("CLAUDE_CODE_MODEL", "anthropic/claude-opus-4.8")
+    roles = dict(run_tb._effective_helper_models("google/gemini-3.5-flash", "google/gemini-3.5-flash", disable_agent_web=True))
+    assert any("claude_code_edit" in r for r in roles.values())
+    # single-model: CLAUDE_CODE_MODEL == measured -> everything dedupes to the one model
+    monkeypatch.setenv("CLAUDE_CODE_MODEL", "google/gemini-3.5-flash")
+    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "google/gemini-3.5-flash")
+    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "google/gemini-3.5-flash,google/gemini-3.5-flash,google/gemini-3.5-flash")
+    roles2 = dict(run_tb._effective_helper_models("google/gemini-3.5-flash", "google/gemini-3.5-flash", disable_agent_web=True))
+    assert list(roles2.keys()) == ["google/gemini-3.5-flash"]
+
+
+# --- report_grade (D: low-k variance warning) -----------------------------------
+
+def test_report_grade_k1_debug_only():
+    grade, warn = run_tb.report_grade(k=1, leaderboard_valid=False)
+    assert grade == "debug_only" and warn and "k=1" in warn
+
+
+def test_report_grade_low_k():
+    grade, warn = run_tb.report_grade(k=3, leaderboard_valid=False)
+    assert grade == "local_low_k" and warn and "k=3" in warn
+
+
+def test_report_grade_leaderboard_valid_no_warning():
+    grade, warn = run_tb.report_grade(k=5, leaderboard_valid=True)
+    assert grade == "leaderboard_valid" and warn == ""
+
+
+def test_report_grade_configurable_floor():
+    grade, warn = run_tb.report_grade(k=7, leaderboard_valid=False, low_k_floor=10)
+    assert grade == "local_low_k" and "< 10" in warn
+
+
+def test_report_grade_valid_overrides_floor():
+    # a leaderboard-valid run is ALWAYS leaderboard_valid regardless of the floor knob
+    grade, warn = run_tb.report_grade(k=5, leaderboard_valid=True, low_k_floor=10)
+    assert grade == "leaderboard_valid" and warn == ""
+
+
+def test_report_grade_k5_not_valid_is_local():
+    # k>=5 but a non-faithful setting (e.g. web-on) => not leaderboard_valid => local_low_k,
+    # and the warning must NOT falsely claim "k < floor" (the reason is the off-spec setting).
+    grade, warn = run_tb.report_grade(k=5, leaderboard_valid=False)
+    assert grade == "local_low_k" and warn
+    assert "< 5" not in warn and "not leaderboard-valid" in warn.lower()
+
+
+# --- disclosure ledger ----------------------------------------------------------
+
+def _write_trial(d: pathlib.Path, task: str, reward, exc=None, reason=None, truncated=False):
+    d.mkdir(parents=True, exist_ok=True)
+    meta = {"turns": 3}
+    if reason is not None:
+        meta["summary"] = {"reason_code": reason, "infra_failed": False, "truncated": truncated,
+                           "resource_limit": ({"status": "resource_limited", "scope": "root"}
+                                              if truncated else {})}
+    (d / "result.json").write_text(json.dumps({
+        "task_name": task, "trial_name": d.name,
+        "verifier_result": {"rewards": {"reward": reward}},
+        "exception_info": ({"exception_type": exc} if exc else None),
+        "agent_result": {"cost_usd": 0.01, "metadata": meta},
+    }), encoding="utf-8")
+
+
+def _write_run_summary(d: pathlib.Path, captured_after_cancellation: bool):
+    adir = d / "agent"
+    adir.mkdir(parents=True, exist_ok=True)
+    (adir / "ouroboros-run-summary.json").write_text(
+        json.dumps({"captured_after_cancellation": captured_after_cancellation, "status": "failed"}),
+        encoding="utf-8",
+    )
+
+
+def test_disclosure_ledger_provider_unavailable_vs_cancellation(tmp_path):
+    """A terminal `provider_unavailable` (captured_after_cancellation=False) is a real
+    provider/infra failure; the same reason_code captured during a Harbor cancellation
+    snapshot (captured_after_cancellation=True) is a wall-clock cancellation, not provider."""
+    jobs = tmp_path / "job"
+    _write_trial(jobs / "p1", "alpha", 0.0, reason="provider_unavailable")
+    _write_run_summary(jobs / "p1", False)  # normal terminal finish
+    _write_trial(jobs / "p2", "beta", 0.0, reason="provider_unavailable")
+    _write_run_summary(jobs / "p2", True)  # interrupted/teardown snapshot
+    led = run_tb.write_disclosure_ledger(jobs_dir=jobs, out_path=tmp_path / "led.json", run_meta={})
+    assert led["provider_or_infra_failure_count"] == 1  # only p1 (genuine mid-run provider death)
+    assert led["wall_clock_cancellation_count"] == 1  # only p2 (teardown artifact)
+    assert led["genuine_failure_count"] == 0
+
+
+def test_disclosure_ledger_separates_cost_truncation_from_a_fair_shot_wrong_answer(tmp_path):
+    """A trial the RUNTIME's own resource rail stopped is not a `genuine` failure.
+
+    `genuine` asserts a FAIR SHOT — reward 0 having reached a real terminal. A trial cut off
+    by the per-task USD reservation bound (a worst-case estimate that reached the rail at
+    $0.45 of actual spend in the v6.81.0 OSWorld smoke) never got one, and counting it as a
+    wrong answer overstates the failure as a capability result. It is not provider/infra
+    either: nothing was unavailable.
+    """
+    jobs = tmp_path / "job"
+    _write_trial(jobs / "b1", "alpha", 0.0, reason="budget_exhausted", truncated=True)
+    _write_trial(jobs / "b2", "beta", 0.0)  # a real fair-shot wrong answer
+    led = run_tb.write_disclosure_ledger(jobs_dir=jobs, out_path=tmp_path / "led.json", run_meta={})
+    assert led["cost_truncated_count"] == 1
+    assert led["genuine_failure_count"] == 1  # b2 only
+    assert led["provider_or_infra_failure_count"] == 0
+    assert led["wall_clock_cancellation_count"] == 0
+    truncated_row = next(t for t in led["trials"] if t["task_name"] == "alpha")
+    assert truncated_row["truncated"] is True
+    assert truncated_row["resource_limit"]["scope"] == "root"
+    assert "cost_truncated" in led["exception_note"]
+
+
+def test_disclosure_ledger_counts(tmp_path):
+    jobs = tmp_path / "job"
+    _write_trial(jobs / "t1", "alpha", 1.0)
+    _write_trial(jobs / "t2", "alpha", 0.0, exc="AgentTimeoutError")
+    _write_trial(jobs / "t3", "beta", None, exc="RuntimeError")  # provider/infra (Harbor exception)
+    _write_trial(jobs / "t4", "beta", 0.0, reason="provider_unavailable")  # clean reward-0, 429 artifact
+    _write_trial(jobs / "t5", "gamma", 0.0)  # genuine wrong answer (no exc, no provider reason)
+    led = run_tb.write_disclosure_ledger(jobs_dir=jobs, out_path=tmp_path / "led.json", run_meta={})
+    assert led["n_trials"] == 5
+    assert led["agent_timeout_count"] == 1
+    # RuntimeError (t3) + provider_unavailable reason_code (t4) both count; AgentTimeoutError does NOT
+    assert led["provider_or_infra_failure_count"] == 2
+    assert led["reason_code_histogram"].get("provider_unavailable") == 1
+    assert led["genuine_failure_count"] == 1  # only t5 is a real wrong answer
+    assert led["reward_distribution"].get("1.0") == 1  # normalized bucket (not split '1' vs '1.0')
+    assert led["per_task_pass_rate"]["alpha"] == 0.5
+
+
+# --- v6.79.0 readiness flags must not change the leaderboard-faithful command ---
+
+def test_default_command_emits_no_env_passthrough_or_base_config(tmp_path):
+    """The new readiness knobs are strictly opt-in: an unflagged run's argv is unchanged, and
+    the job config still contains exactly our agents[] block."""
+    cmd = run_tb.harbor_command(_cfg(jobs_dir=tmp_path))
+    assert "--ae" not in cmd and "--ve" not in cmd
+    assert run_tb.redacted_command(cmd) == cmd
+    config = json.loads((tmp_path / "agent_job_config.json").read_text(encoding="utf-8"))
+    assert list(config) == ["agents"]
+    assert config["agents"][0]["kwargs"]["dataset"] == "terminal-bench/terminal-bench-2-1"
+
+
+# A stand-in for the thing this guard exists to stop: a shell-expanded credential arriving where
+# a NAME=VALUE pair was expected. Deliberately NOT shaped like a real key -- the point of the test
+# is that this string never appears in an artifact, and a realistic-looking token in a fixture is
+# itself a small leak of the pattern scrubbers look for.
+_UNSPLITTABLE_TOKEN = "NOT-AN-ASSIGNMENT-PLACEHOLDER"
+
+
+@pytest.mark.parametrize("flag", ["--agent-env", "--verifier-env"])
+def test_env_passthrough_without_equals_is_refused_before_any_artifact(flag, tmp_path, capsys):
+    """A `--ve $OPENAI_API_KEY` typo hands this launcher one token with no `=`. Every consumer
+    split on the first `=` and called the left half a NAME, so the WHOLE token -- the credential --
+    was persisted as `verifier_env_keys` in run_manifest.json, printed as `<token>=<redacted>` in
+    the official command, and named in the passthrough warning. It must be refused at parse, with
+    the token never echoed, and nothing written."""
+    run_root = tmp_path / "run"
+    with pytest.raises(SystemExit) as excinfo:
+        run_tb.main(["--run-root", str(run_root), flag, _UNSPLITTABLE_TOKEN])
+    assert excinfo.value.code == 2
+    streams = capsys.readouterr()
+    assert _UNSPLITTABLE_TOKEN not in streams.out
+    assert _UNSPLITTABLE_TOKEN not in streams.err
+    assert "NAME=VALUE" in streams.err
+    # No manifest, no run root, nothing on disk to leak from.
+    assert not list(tmp_path.rglob("run_manifest.json"))
+    assert not run_root.exists()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [_UNSPLITTABLE_TOKEN, "=novalue", "1LEADING_DIGIT=x", "HAS SPACE=x", "HAS\nNEWLINE=x", "a-b=x"],
+)
+def test_env_assignment_requires_a_posix_name_and_an_explicit_equals(bad):
+    """The name is the only half this launcher ever writes down, so it must BE a name: no `=` at
+    all, an empty name, or one carrying a space/newline/dash would inject into the manifest and the
+    warning, or produce a scrub marker nothing can match."""
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+        run_tb.env_assignment(bad)
+    assert bad not in str(excinfo.value)
+    assert run_tb.env_assignment("OPENAI_API_KEY=x=y") == "OPENAI_API_KEY=x=y"
+    assert run_tb.env_assignment("_UNDERSCORE0=") == "_UNDERSCORE0="
+
+
+def test_redacted_command_never_publishes_a_malformed_token_as_a_name():
+    """Defence in depth for an argv assembled outside `main()`: a passthrough value that is not a
+    well-formed `NAME=…` is replaced WHOLESALE, instead of being emitted as `<secret>=<redacted>`."""
+    out = run_tb.redacted_command(["harbor", "--ve", _UNSPLITTABLE_TOKEN, "--ae", "OPENAI_API_KEY=x"])
+    assert out == ["harbor", "--ve", "<redacted>", "--ae", "OPENAI_API_KEY=<redacted>"]
+    assert _UNSPLITTABLE_TOKEN not in " ".join(out)
+
+
+def test_tb21_submission_subtree_is_unchanged():
+    """A derived path must reproduce the published TB2.1 tree exactly."""
+    assert run_tb.submission_subtree(run_tb.DEFAULT_DATASET) == ("terminal-bench", "2.1")
+
+
+# --- Frontier-Bench readiness (dataset identity + execution backend disclosure) ---
+
+def test_frontier_bench_identity_threads_through_job_config_and_argv(tmp_path):
+    """Frontier-Bench is a DATASET, not a second launcher: the same identity that already feeds
+    harbor's `--dataset` must reach the adapter kwarg it uses to pick the per-task cache subtree
+    (`~/.cache/harbor/tasks/packages/frontier-bench/<task>/<digest>`). A parallel mechanism here
+    would silently make FB runs deadline-blind, which is the exact bug v6.79.0 fixed for TB2.1."""
+    cmd = run_tb.harbor_command(_cfg(jobs_dir=tmp_path, dataset=run_tb.FRONTIER_BENCH_DATASET))
+    assert cmd[cmd.index("--dataset") + 1] == "frontier-bench/frontier-bench"
+    config = json.loads((tmp_path / "agent_job_config.json").read_text(encoding="utf-8"))
+    assert config["agents"][0]["kwargs"]["dataset"] == "frontier-bench/frontier-bench"
+
+
+def test_frontier_bench_submission_subtree_carries_no_invented_version():
+    """FB carries its version in the harbor REF (`@v0.1.0`), never in the dataset name, so the
+    name-based derivation must NOT fabricate one: it yields an empty version component that main()
+    drops, instead of mis-parsing `frontier-bench` into a `frontier/bench`-shaped path."""
+    assert run_tb.submission_subtree(run_tb.FRONTIER_BENCH_DATASET) == ("frontier-bench", "")
+
+
+def test_submission_subtree_strips_a_pinned_harbor_ref():
+    """A reproducible FB run pins an immutable ref, and `latest` is mutable — so pinning is the
+    NORMAL case, not an edge one. The ref is registry addressing: it must not leak a literal `@`
+    into a submission directory name, and TB2.1's derivation must survive being pinned too."""
+    assert run_tb.submission_subtree("frontier-bench/frontier-bench@v0.1.0") == ("frontier-bench", "")
+    assert run_tb.submission_subtree("frontier-bench/frontier-bench@sha256:abc123") == ("frontier-bench", "")
+    assert run_tb.submission_subtree("terminal-bench/terminal-bench-2-1@5") == ("terminal-bench", "2.1")
+
+
+def test_harbor_env_backend_is_opt_in_and_absent_by_default(tmp_path):
+    """Backend selection must not perturb the published TB2.1 argv: with no flag, harbor's own
+    default (docker) applies and no `--env` token is emitted."""
+    assert "--env" not in run_tb.harbor_command(_cfg(jobs_dir=tmp_path))
+
+
+def test_harbor_env_backend_is_emitted_when_chosen(tmp_path):
+    """A cloud backend is reachable without a base job config — upstream FB CI uses `--env modal`,
+    and our local docker verification does not make that path unreachable."""
+    cmd = run_tb.harbor_command(_cfg(jobs_dir=tmp_path, harbor_env="modal"))
+    assert cmd[cmd.index("--env") + 1] == "modal"
+
+
+def test_harbor_version_reports_a_fake_binary_and_swallows_failures(monkeypatch):
+    """Harness provenance is best-effort by design: a working binary is reported verbatim, and an
+    un-interrogable one records "" (visibly unknown) instead of aborting a run.
+
+    The three outcomes are injected at the `subprocess.run` seam rather than acted out with a real
+    `#!/bin/sh` script: Windows does not honour a shebang on direct execution, so the script form
+    made `harbor_version` return "" on the Windows CI shard and failed the 0.20.0 assertion there
+    while passing everywhere the author could see."""
+    calls: list[list[str]] = []
+
+    def _fake_run(outcome):
+        def run(cmd, **kwargs):
+            calls.append(list(cmd))
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        return run
+
+    monkeypatch.setattr(
+        run_tb.subprocess, "run",
+        _fake_run(subprocess.CompletedProcess(args=[], returncode=0, stdout="0.20.0\n", stderr="")),
+    )
+    assert run_tb.harbor_version("harbor") == "0.20.0"
+    assert calls[-1] == ["harbor", "--version"]
+
+    monkeypatch.setattr(
+        run_tb.subprocess, "run",
+        _fake_run(subprocess.CompletedProcess(args=[], returncode=3, stdout="", stderr="boom\n")),
+    )
+    assert run_tb.harbor_version("harbor") == ""
+
+    monkeypatch.setattr(run_tb.subprocess, "run", _fake_run(FileNotFoundError("no such binary")))
+    assert run_tb.harbor_version("does-not-exist") == ""
