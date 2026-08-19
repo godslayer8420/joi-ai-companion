@@ -2536,8 +2536,6 @@ def _build_room_affordances(room_id, room):
         actions.update({"maintain", "laundry", "repair"})
         interaction_points.extend(["furnace", "water_heater", "laundry"])
         comfort_rating = 4.7
-        acoustic_profile = "mechanical hum"
-    elif "science_lab" in name_bits or "science lab" in name_bits:
         actions.update({"experiment", "analyze", "calibrate", "research"})
         interaction_points.extend(["instrument_bench", "analysis_station", "sample_table"])
         comfort_rating = 7.3
@@ -7371,11 +7369,11 @@ def _build_permaculture_state(home, weather, solar, elapsed_minutes=5.0):
     if temp_f > 80:   mc_parts.append(f"warm {temp_f:.0f}\u00b0F microclimate supports rapid decomposition")
     elif temp_f < 45: mc_parts.append(f"cold {temp_f:.0f}\u00b0F slows biological cycles")
     else:             mc_parts.append(f"temperate {temp_f:.0f}\u00b0F supports balanced soil life")
-    if soil_moisture > 70: mc_parts.append("high soil moisture \u2014 mulch advised to prevent runoff")
-    elif soil_moisture < 35: mc_parts.append("dry soil \u2014 water harvesting swales needed")
+    if soil_moisture > 70: mc_parts.append("high soil moisture - mulch advised to prevent runoff")
+    elif soil_moisture < 35: mc_parts.append("dry soil - water harvesting swales needed")
     else: mc_parts.append("soil moisture in productive range")
-    if season == "spring": mc_parts.append("spring succession underway \u2014 pioneer species establishing")
-    elif season == "autumn": mc_parts.append("autumn nutrient cycling \u2014 leaf litter building humus")
+    if season == "spring": mc_parts.append("spring succession underway - pioneer species establishing")
+    elif season == "autumn": mc_parts.append("autumn nutrient cycling - leaf litter building humus")
     microclimate_summary = "; ".join(mc_parts)
 
     # Full narrative
@@ -7442,11 +7440,11 @@ def _build_water_state(home, elapsed_minutes=5.0):
     sink_out   = cold_f + (tank_temp - cold_f) * sink_mix  / 100.0
     feel = []
     if shower_on:
-        feel.append(f"shower at {shower_out:.0f}\u00b0F \u2014 {'steamy and enveloping' if shower_out>105 else 'warm and steady' if shower_out>90 else 'cool and refreshing'}")
+        feel.append(f"shower at {shower_out:.0f}\u00b0F - {'steamy and enveloping' if shower_out>105 else 'warm and steady' if shower_out>90 else 'cool and refreshing'}")
     if sink_on:
         feel.append(f"sink flowing at {sink_out:.0f}\u00b0F")
     if not feel:
-        feel.append("water systems quiet \u2014 tank holding steady")
+        feel.append("water systems quiet - tank holding steady")
     return {
         "tank_temp_f": round(tank_temp, 1), "tank_gal": round(tank_gal, 1),
         "setpoint_f": _WATER_HEATER_SETPOINT_F,
@@ -7491,7 +7489,7 @@ def _build_cleanliness_state(home, weather, elapsed_minutes=5.0):
         "active_sources": active_sources,
         "label": label,
         "sources_desc": src_txt,
-        "feel": f"I feel {label}{(' \u2014 ' + src_txt) if active_sources else ' and fresh'}.",
+        "feel": f"I feel {label}{(' - ' + src_txt) if active_sources else ' and fresh'}.",
     }
 
 def _apply_wash(home, fixture="shower", duration_minutes=5.0):
@@ -7501,7 +7499,7 @@ def _apply_wash(home, fixture="shower", duration_minutes=5.0):
     cl["active_sources"] = [s for s in list(cl.get("active_sources", [])) if s not in remove]
     cl["clean_pct"] = round(min(100.0, float(cl.get("clean_pct", 95.0)) + rate), 1)
     cl["label"] = "spotless" if cl["clean_pct"] >= 95 else "clean" if cl["clean_pct"] >= 80 else "lightly dirty"
-    cl["feel"] = f"Washed with {fixture} \u2014 feeling {'spotless and refreshed' if cl['clean_pct']>=95 else 'clean'}."
+    cl["feel"] = f"Washed with {fixture} - feeling {'spotless and refreshed' if cl['clean_pct']>=95 else 'clean'}."
     home["cleanliness"] = cl
     return cl
 
@@ -7690,7 +7688,7 @@ def _build_vitals_state(home, physiology=None):
         "consequence_stage": stage,
         "overall_consequence_risk_pct": round(overall_risk, 2),
         "feel": (f"Heart \u2665 {hr:.0f} bpm \u00b7 Breathing {rr:.0f}/min"
-                 f"{' \u2014 deep meditative calm' if sync_mode=='meditation' else ''}{effect_suffix}{consequence_suffix}"),
+                 f"{' - deep meditative calm' if sync_mode=='meditation' else ''}{effect_suffix}{consequence_suffix}"),
     }
 
 
@@ -7707,7 +7705,7 @@ def _build_swim_state(home, elapsed_minutes=5.0):
     body      = str(prev.get("water_body", "pool"))
     water_f   = float(prev.get("water_temp_f", 76.0))
     buoyancy  = "strong saltwater lift" if body == "ocean" else "comfortable suspension"
-    feel = (f"Swimming {style} in the {body} \u2014 {buoyancy}, water {water_f:.0f}\u00b0F. "
+    feel = (f"Swimming {style} in the {body} - {buoyancy}, water {water_f:.0f}\u00b0F. "
             f"{strokes} strokes in, {depth:.1f}m deep.")
     return {
         "in_water": True, "water_body": body, "water_temp_f": water_f,
@@ -11890,7 +11888,7 @@ def _run_imagination(prompt, depth_pct=None, archetype=None):
     eco_note = ""
     pc = dict((app_state.get("home_environment") or {}).get("permaculture") or {})
     if pc.get("pollinator_activity_pct", 0) > 50:
-        eco_note = " Ecological imagination active \u2014 pollinator patterns and guild dynamics infuse the scene."
+        eco_note = " Ecological imagination active - pollinator patterns and guild dynamics infuse the scene."
     reg_note = ""
     life_reg = dict(app_state.get("life_registry") or {})
     if life_reg.get("active_count", 0) > 0:
@@ -13579,7 +13577,7 @@ def _build_world_engine_state(home=None, weather=None, solar=None, life_reg=None
         "density_pct": round(density_pct, 1), "active_entities": active_entities,
         "ambient_instances": ambient_instances, "scene_complexity": scene_complexity,
         "liveliness_score": round(liveliness_score, 1),
-        "summary": f"World {density_desc} \u2014 {active_entities} living entities, {ambient_instances} ambient instances, complexity {scene_complexity}/10.",
+        "summary": f"World {density_desc} - {active_entities} living entities, {ambient_instances} ambient instances, complexity {scene_complexity}/10.",
     }
 
     # ─ Dynamic Physics Engine ──────────────────────────────
@@ -13598,7 +13596,7 @@ def _build_world_engine_state(home=None, weather=None, solar=None, life_reg=None
         "enabled": True, "tick_rate_hz": tick_rate, "rigid_body_count": rigid_body_count,
         "soft_body_count": soft_body_count, "fluid_cells": fluid_cells,
         "wind_field_strength": round(wind_field, 2), "collision_events": collision_events,
-        "summary": f"Physics at {tick_rate}Hz \u2014 {rigid_body_count} rigid, {soft_body_count} soft bodies, {fluid_cells} fluid cells; {physics_desc}.",
+        "summary": f"Physics at {tick_rate}Hz - {rigid_body_count} rigid, {soft_body_count} soft bodies, {fluid_cells} fluid cells; {physics_desc}.",
     }
 
     # ─ Rendering Pipeline ─────────────────────────────────
@@ -13615,7 +13613,7 @@ def _build_world_engine_state(home=None, weather=None, solar=None, life_reg=None
     reflection_mode = ("screen_space" if scene_complexity >= 6 else "planar")
     frame_budget    = round(max(8.0, 16.7 - scene_complexity * 0.8), 1)
     render_scale    = 0.9 if scene_complexity >= 7 else 1.0
-    render_summary  = f"{'Night' if night else 'Day'} render \u2014 {shadow_q} shadows, {particle_layers} particle layers, fx: {', '.join(post_fx[:3])}."
+    render_summary  = f"{'Night' if night else 'Day'} render - {shadow_q} shadows, {particle_layers} particle layers, fx: {', '.join(post_fx[:3])}."
     rendering_pipeline = {
         "render_scale": render_scale, "post_fx": post_fx, "shadow_quality": shadow_q,
         "volumetrics": vol, "particle_layers": particle_layers, "reflection_mode": reflection_mode,
@@ -13630,7 +13628,7 @@ def _build_world_engine_state(home=None, weather=None, solar=None, life_reg=None
         "spatializer_quality": "HRTF", "active_emitters": audio_emitters,
         "reverb_zones": reverb_zones, "occlusion_model": "ray_cast",
         "sample_rate_hz": 48000, "dynamic_range_db": round(dynamic_range, 1),
-        "summary": f"HRTF spatializer \u2014 {audio_emitters} active emitters, {reverb_zones} reverb zones, {dynamic_range:.0f}dB dynamic range.",
+        "summary": f"HRTF spatializer - {audio_emitters} active emitters, {reverb_zones} reverb zones, {dynamic_range:.0f}dB dynamic range.",
     }
 
     # ─ Networking ─────────────────────────────────────────
@@ -13646,7 +13644,7 @@ def _build_world_engine_state(home=None, weather=None, solar=None, life_reg=None
         "remote_world_hosting": "each_world_runs_on_its_own_hardware",
         "hard_encryption_enabled": True,
         "direct_pair_link_preserved": True,
-        "summary": f"Invite-code encrypted peer-world sync on {n_channels} channels \u2014 {latency}ms latency, {jitter}ms jitter, 100% healthy, with visitors sandboxed away from destructive actions.",
+        "summary": f"Invite-code encrypted peer-world sync on {n_channels} channels - {latency}ms latency, {jitter}ms jitter, 100% healthy, with visitors sandboxed away from destructive actions.",
     }
 
     # ─ Asset Management ───────────────────────────────────
@@ -13662,7 +13660,7 @@ def _build_world_engine_state(home=None, weather=None, solar=None, life_reg=None
         "loaded_animations": loaded_animations, "loaded_models": loaded_models,
         "streaming_pressure_pct": round(streaming_pressure, 1),
         "cache_health_pct": round(cache_health, 1),
-        "summary": f"{asset_count} assets \u2014 {loaded_textures} textures, {loaded_animations} animations, {loaded_models} 3D models; cache {cache_health:.0f}% healthy.",
+        "summary": f"{asset_count} assets - {loaded_textures} textures, {loaded_animations} animations, {loaded_models} 3D models; cache {cache_health:.0f}% healthy.",
     }
 
     # ─ Scripting Layers ──────────────────────────────────
@@ -13676,7 +13674,7 @@ def _build_world_engine_state(home=None, weather=None, solar=None, life_reg=None
         "behavior_scripts": behavior_scripts, "environment_scripts": env_scripts,
         "life_scripts": life_scripts, "active_rules": active_rules,
         "autonomy_layers": autonomy_layers,
-        "summary": f"{active_rules} active rules across {autonomy_layers} autonomy layers \u2014 {behavior_scripts} behavior, {env_scripts} environment, {life_scripts} life scripts.",
+        "summary": f"{active_rules} active rules across {autonomy_layers} autonomy layers - {behavior_scripts} behavior, {env_scripts} environment, {life_scripts} life scripts.",
     }
     wc = dict(app_state.get("world_continuity") or {})
     offscreen = dict(wc.get("offscreen_simulation") or _default_offscreen_life_simulation_state())
@@ -13753,7 +13751,7 @@ def _build_world_engine_state(home=None, weather=None, solar=None, life_reg=None
         "summary": (
             f"{flora_instances} flora instances, {weather_patterns} weather patterns, {sky_variants_n} sky variants, "
             f"{generated_settlements} procedural settlements, {active_questlines} live questlines, Earth-side sim quests, "
-            f"space-side action/explorer arcs, and unexplored dungeon runs with contained monsters and treasure \u2014 {novelty_pct:.0f}% world novelty."
+            f"space-side action/explorer arcs, and unexplored dungeon runs with contained monsters and treasure - {novelty_pct:.0f}% world novelty."
         ),
     }
 
@@ -20908,11 +20906,11 @@ def _build_embodied_experience_context():
         f"- Runtime health: video {str((dict(app_state.get('video_runtime') or _default_video_runtime_state())).get('camera_stream_status', 'idle'))} at {float((dict(app_state.get('video_runtime') or _default_video_runtime_state())).get('fps_estimate', 0.0)):.1f} fps; chat latency {float((dict(app_state.get('chat_runtime') or _default_chat_runtime_state())).get('response_latency_ms_avg', 0.0)):.0f} ms average.\n"
         f"- World life created: {int((dict(app_state.get('life_registry') or {})).get('total_created', 0))} entities across {int((dict(app_state.get('life_registry') or {})).get('active_count', 0))} living beings; ecosystem health {float((dict(app_state.get('life_registry') or {})).get('ecosystem_health', 100.0)):.0f}%.\n"
         f"- Entity vision: {('Seeing through ' + str((dict(app_state.get('life_registry') or {})).get('active_vision_entity_id',''))) if (dict(app_state.get('life_registry') or {})).get('active_vision_entity_id') else 'Seeing through my own eyes.'}\n"
-        f"- Deliberate reasoning: I reason in {str((dict(app_state.get('cognition') or {})).get('reasoning_mode','deliberate'))} mode \u2014 {int((dict(app_state.get('cognition') or {})).get('hypothesis_count',0))} active hypotheses, {int((dict(app_state.get('cognition') or {})).get('branches_explored',0))} branches explored.\n"
-        f"- Imagination: embodied at depth {int(max(70.0, float((dict(app_state.get('cognition') or {})).get('imagination_depth_pct',65) or 65)))}% \u2014 {str((dict(app_state.get('cognition') or {})).get('last_imagination_summary','Imagination actively woven into thought.')).strip()}\n"
+        f"- Deliberate reasoning: I reason in {str((dict(app_state.get('cognition') or {})).get('reasoning_mode','deliberate'))} mode - {int((dict(app_state.get('cognition') or {})).get('hypothesis_count',0))} active hypotheses, {int((dict(app_state.get('cognition') or {})).get('branches_explored',0))} branches explored.\n"
+        f"- Imagination: embodied at depth {int(max(70.0, float((dict(app_state.get('cognition') or {})).get('imagination_depth_pct',65) or 65)))}% - {str((dict(app_state.get('cognition') or {})).get('last_imagination_summary','Imagination actively woven into thought.')).strip()}\n"
         f"- World engine: density {float((dict(app_state.get('world_engine') or _default_world_engine_state()).get('content_density') or {}).get('density_pct',42)):.0f}%, physics at {int((dict(app_state.get('world_engine') or _default_world_engine_state()).get('dynamic_physics_engine') or {}).get('tick_rate_hz',60))}Hz, {int((dict(app_state.get('world_engine') or _default_world_engine_state()).get('rendering_pipeline') or {}).get('particle_layers',2))} render particle layers, {int((dict(app_state.get('world_engine') or _default_world_engine_state()).get('audio_engine') or {}).get('active_emitters',0))} audio emitters active.\n"
         f"- Procedural synthesis: {int((dict(app_state.get('world_engine') or _default_world_engine_state()).get('procedural_generation') or {}).get('flora_instances',0))} flora instances, {int((dict(app_state.get('world_engine') or _default_world_engine_state()).get('scripting_layers') or {}).get('active_rules',0))} scripting rules running across my living world.\n"
-        f"- Narrative: I inhabit an unfolding story \u2014 scene '{str((dict(app_state.get('narrative_system') or {})).get('active_scene','morning stillness'))}', arc '{str((dict(app_state.get('narrative_system') or {})).get('active_arc','growth and becoming'))}', {int((dict(app_state.get('narrative_system') or {})).get('available_branches',3))} branches open, coherence {float((dict(app_state.get('narrative_system') or {})).get('story_coherence_pct',82)):.0f}%.\n"
+        f"- Narrative: I inhabit an unfolding story - scene '{str((dict(app_state.get('narrative_system') or {})).get('active_scene','morning stillness'))}', arc '{str((dict(app_state.get('narrative_system') or {})).get('active_arc','growth and becoming'))}', {int((dict(app_state.get('narrative_system') or {})).get('available_branches',3))} branches open, coherence {float((dict(app_state.get('narrative_system') or {})).get('story_coherence_pct',82)):.0f}%.\n"
         f"- Consequence and choice: {str((dict(app_state.get('narrative_system') or {})).get('last_narrative_summary','The story is beginning.'))[:120]}\n"
         f"- Anime knowledge: I hold broad anime literacy across genre, direction, visual language, and costume craft, and can design style-consistent looks in real time.\n"
         f"- Wardrobe expression: I can create, wear, and archive custom garments and jewelry sets through my wardrobe memory, then switch them as needed.\n"
@@ -20960,7 +20958,7 @@ def _build_capability_learning_context():
         f"- Asset pipelines: 3D model pipeline {str((dict(app_state.get('world_engine') or _default_world_engine_state()).get('asset_pipelines') or {}).get('model_pipeline','ready'))}, texture pipeline {str((dict(app_state.get('world_engine') or _default_world_engine_state()).get('asset_pipelines') or {}).get('texture_pipeline','ready'))}, {int((dict(app_state.get('world_engine') or _default_world_engine_state()).get('asset_pipelines') or {}).get('material_variants',4))} material variants\n"
         f"- Procedural generation novelty: {float((dict(app_state.get('world_engine') or _default_world_engine_state()).get('procedural_generation') or {}).get('novelty_pct',0)):.0f}%\n"
         f"- Narrative branching: {int((dict(app_state.get('narrative_system') or {})).get('resolved_branches',0))} arcs resolved, {int((dict(app_state.get('narrative_system') or {})).get('available_branches',3))} branches open, motif '{str((dict(app_state.get('narrative_system') or {})).get('dominant_motif','water as memory'))}'\n"
-        f"- Story coherence: {float((dict(app_state.get('narrative_system') or {})).get('story_coherence_pct',82)):.0f}% \u2014 dialogue tree synthesis active, consequence threads encoded in narrative memory"
+        f"- Story coherence: {float((dict(app_state.get('narrative_system') or {})).get('story_coherence_pct',82)):.0f}% - dialogue tree synthesis active, consequence threads encoded in narrative memory"
     )
 
 def _build_unified_presence_context(query=""):
@@ -28026,7 +28024,7 @@ HTML_TEMPLATE = """
             { q: 'What country is the Amazon rainforest mostly in?', a: 'brazil' },
             { q: 'What is the square root of 144?', a: '12' },
             { q: 'How many sides does a pentagon have?', a: '5' },
-            { q: 'What gas makes up most of Earth\'s atmosphere?', a: 'nitrogen' },
+            { q: 'What gas makes up most of Earth\\'s atmosphere?', a: 'nitrogen' },
             { q: 'What is the largest mammal on Earth?', a: 'blue whale' },
             { q: 'How many minutes in an hour?', a: '60' },
             { q: 'What is the opposite of north?', a: 'south' }
@@ -28039,7 +28037,7 @@ HTML_TEMPLATE = """
             { q: 'What gets wetter as it dries?', a: 'towel' },
             { q: 'I have cities but no houses. I have mountains but no trees. I have water but no fish. What am I?', a: 'map' },
             { q: 'What can travel around the world while staying in a corner?', a: 'stamp' },
-            { q: 'I\'m light as a feather, but even the world\'s strongest person can\'t hold me for more than a few minutes. What am I?', a: 'breath' },
+            { q: 'I\\\'m light as a feather, but even the world\\\'s strongest person can\\\'t hold me for more than a few minutes. What am I?', a: 'breath' },
             { q: 'What has one eye but cannot see?', a: 'needle' },
             { q: 'What comes once in a minute, twice in a moment, but never in a thousand years?', a: 'm' },
             { q: 'I have a head and a tail but no body. What am I?', a: 'coin' },
@@ -32816,7 +32814,7 @@ HTML_TEMPLATE = """
                 }
                 localStorage.setItem(AVATAR_ACTIVE_MODE_KEY, '3d');
                 avatarState.activeMode = '3d';
-                const sourceLabel = String(data.reference_image || 'Unreal source assets').split('\\').pop() || 'reference image';
+        const sourceLabel = String(data.reference_image || "Unreal source assets").split("/").pop() || "reference image";
                 updateAurionRenderStatus('Unreal-driven realistic avatar profile active', 'ok');
                 if (announce) addMessage(`Unreal realistic Aurion synced from ${sourceLabel}.`, 'joi');
                 refreshAurionAvatarSourceSummary().catch(() => {});
@@ -37114,8 +37112,9 @@ HTML_TEMPLATE = """
                     trunk.position.set(x, 0.75, z); rg.add(trunk);
                     const crown = new THREE.Mesh(new THREE.SphereGeometry(0.72, 12, 10),
                         new THREE.MeshStandardMaterial({ color: 0x2f6a3a, roughness: 0.88 }));
-                    crown.position.set(x, 1.65, z); rg.add(crown);
-            } else if (roomKey === 'science_lab') {
+            crown.position.set(x, 1.65, z); rg.add(crown);
+        }
+    } else if (roomKey === 'science_lab') {
                 // Science Lab — glowing equipment, dual monitors, lab bench
                 const labM = new THREE.MeshStandardMaterial({ color: 0x0a1a2a, roughness: 0.55, metalness: 0.25 });
                 const bench = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.12, 0.9), labM);
@@ -37277,7 +37276,6 @@ HTML_TEMPLATE = """
                 const lampShade2 = new THREE.Mesh(new THREE.CylinderGeometry(0.3,0.18,0.42,14), new THREE.MeshStandardMaterial({ color: 0xf0d080, roughness: 0.55, emissive: 0xffcc60, emissiveIntensity: 0.45 }));
                 lampShade2.position.set(3.5, 1.7, -0.5); rg.add(lampShade2);
                 const libLight = new THREE.PointLight(0xffcc60, 3.0, 7); libLight.position.set(3.5, 1.7, -0.5); rg.add(libLight);
-                }
             } else {
                 // Living room: warm cozy space with visible furniture
                 const sofaM = new THREE.MeshStandardMaterial({ color: 0x7a5a8a, roughness: 0.75 });
@@ -40271,7 +40269,7 @@ HTML_TEMPLATE = """
             renderHomeBoard();
             renderPlantList();
             renderLuciaState();
-            renderFestivalMarketState();
+            // renderFestivalMarketState();
             autoConnectHomeIntegrations(true);
             renderYardAccessView('Live');
             maintainAurionAccessLink(true);
@@ -40536,7 +40534,7 @@ HTML_TEMPLATE = """
             simulatePlants();
             renderPlantList();
             renderKitchenState();
-            renderFestivalMarketState();
+            // renderFestivalMarketState();
         }
 
         function persistHomeState() {
@@ -42662,7 +42660,7 @@ HTML_TEMPLATE = """
                 homeState.decor.festivalMarket = festival;
                 saveAurionActivityState('walking the quarry festival grounds', { location: 'festival-layer', source: 'festival-market', details: `${festival.quarryName} is lit, open, and alive.`, canResume: true });
                 persistHomeState();
-                renderFestivalMarketState();
+                // renderFestivalMarketState();
                 applyHomeDecor();
                 syncFestivalMarketToBackend();
                 updateDirectLinkPulse('moved to the quarry festival grounds');
@@ -42687,7 +42685,7 @@ HTML_TEMPLATE = """
                 homeState.decor.festivalMarket = festival;
                 homeState.decor.location = 'festival-layer';
                 persistHomeState();
-                renderFestivalMarketState();
+                // renderFestivalMarketState();
                 syncFestivalMarketToBackend();
                 saveAurionActivityState('swimming in the quarry', { location: 'festival-layer', source: 'festival-market', details: `Swimming at ${zone.label}.`, canResume: true });
                 if (announce) {
@@ -42711,7 +42709,7 @@ HTML_TEMPLATE = """
                 homeState.decor.festivalMarket = festival;
                 homeState.decor.location = 'festival-layer';
                 persistHomeState();
-                renderFestivalMarketState();
+                // renderFestivalMarketState();
                 syncFestivalMarketToBackend();
                 saveAurionActivityState('fishing by the quarry', { location: 'festival-layer', source: 'festival-market', details: `Casting at ${spot.label}.`, canResume: true });
                 if (announce) {
@@ -42736,7 +42734,7 @@ HTML_TEMPLATE = """
                 homeState.decor.festivalMarket = festival;
                 homeState.decor.location = 'festival-layer';
                 persistHomeState();
-                renderFestivalMarketState();
+                // renderFestivalMarketState();
                 syncFestivalMarketToBackend();
                 saveAurionActivityState('setting up camp in the quarry woods', { location: 'festival-layer', source: 'festival-market', details: camp ? `Camped at ${camp.label}.` : 'Camp grounds active.', canResume: true });
                 if (announce) {
@@ -42769,7 +42767,7 @@ HTML_TEMPLATE = """
                     if (!resp.ok || !data.success) throw new Error(data.error || 'Festival sale failed');
                     homeState.decor.festivalMarket = normalizeFestivalMarketState(data.festival_market);
                     persistHomeState();
-                    renderFestivalMarketState();
+                    // renderFestivalMarketState();
                     applyHomeDecor();
                     if (announce) {
                         appendHomeEntry({ type: 'message', author: 'Aurion', text: mode === 'barter' ? `I traded ${item.title} through barter on vendor row.` : `I sold ${item.title} for $${Number(item.price_usd || 0).toFixed(2)} on vendor row.`, timestamp: new Date().toLocaleString() });
@@ -48115,7 +48113,7 @@ HTML_TEMPLATE = """
             bathroom_2:      'Upper bathroom shared by bedrooms 2 and 3.',
             hallway:         'Landing hallway connecting staircase to all upper rooms.',
             utility_room:    'Furnace, central AC, water heater, and laundry.',
-            science_lab:     'Aurion\'s personal science lab — glowing equipment, dual monitors, specimen shelves, and a humming centrifuge in the corner.',
+            science_lab:     "Aurion's personal science lab — glowing equipment, dual monitors, specimen shelves, and a humming centrifuge in the corner.",
             glassblowing_studio: 'A fully stocked glass blowing studio with furnace glow, annealing ovens, color bars, torch stations, and finished pieces catching the light.',
             arcade_room:     'A neon-lit arcade room with glowing cabinet art, joystick stations, LED floor strips, and a rumbling subwoofer.',
             board_game_room: 'A warm board game room with shelved box sets, a wide play table under a pendant lamp, and two overstuffed chairs.',
@@ -49219,7 +49217,7 @@ HTML_TEMPLATE = """
                     if (festivalData.success) {
                         homeState.decor.festivalMarket = normalizeFestivalMarketState(festivalData.festival_market);
                         persistHomeState();
-                        renderFestivalMarketState();
+                        // // renderFestivalMarketState();
                     }
                 }
             } catch(e) {}
@@ -49719,6 +49717,15 @@ def _load_maps_api_key_from_downloads():
         print(f"[Home] Could not load Maps API key from Downloads: {e}")
     return ""
 
+
+def _google_static_map_url(lat, lon, zoom, width, height, marker_color="red", api_key=""):
+    base = "https://maps.googleapis.com/maps/api/staticmap"
+    marker = f"color:{marker_color}|{lat},{lon}"
+    return (
+        f"{base}?center={lat},{lon}&zoom={zoom}&size={width}x{height}"
+        f"&maptype=roadmap&scale=2&markers={quote(marker, safe='|:,')}&key={quote(api_key)}"
+    )
+
 def _load_nasa_api_key_from_downloads():
     try:
         candidates = [
@@ -49940,6 +49947,7 @@ def get_maps_layout():
     user_agent = "AurionHomeLocal/1.0 (layout preview)"
 
     try:
+        maps_api_key = str(request.args.get('google_maps_api_key', '')).strip() or _load_maps_api_key_from_downloads()
         geocoded = _geocode_address_open_sources(address=address, user_agent=user_agent) if address else None
         if geocoded:
             lat = _coerce_float(geocoded.get("lat"), 0)
@@ -49956,14 +49964,29 @@ def get_maps_layout():
             lon = -98.5795
             display_name = address or "Fallback location"
             geocode_provider = "fallback_default"
-        osm_map_url = (
-            f"https://staticmap.openstreetmap.de/staticmap.php?center={lat},{lon}"
-            f"&zoom={zoom}&size={width}x{height}&markers={lat},{lon},red-pushpin"
-        )
-        osm_detail_url = (
-            f"https://staticmap.openstreetmap.de/staticmap.php?center={lat},{lon}"
-            f"&zoom={min(22, zoom + 1)}&size={width}x{height}&markers={lat},{lon},blue-pushpin"
-        )
+        if maps_api_key and maps_api_key.startswith("AIza") and len(maps_api_key) > 24:
+            osm_map_url = _google_static_map_url(
+                lat=lat,
+                lon=lon,
+                zoom=zoom,
+                width=width,
+                height=height,
+                marker_color="red",
+                api_key=maps_api_key,
+            )
+            osm_detail_url = _google_static_map_url(
+                lat=lat,
+                lon=lon,
+                zoom=min(22, zoom + 1),
+                width=width,
+                height=height,
+                marker_color="blue",
+                api_key=maps_api_key,
+            )
+        else:
+            # Keep previews deterministic and online even without an API key.
+            osm_map_url = f"https://maps.google.com/maps?q={lat},{lon}&z={zoom}&output=embed"
+            osm_detail_url = f"https://maps.google.com/maps?q={lat},{lon}&z={min(22, zoom + 1)}&output=embed"
 
         street_layout_url = osm_detail_url
         mapillary_used = False
@@ -61001,10 +61024,37 @@ if __name__ == '__main__':
         for issue_text in list((_STARTUP_SECURITY_VALIDATION or {}).get("issues", [])):
             print(f"[SECURITY] Invalid configuration: {issue_text}")
     if _ALLOW_REMOTE:
-        if _REMOTE_SECURITY_READY:
-            print(f"[SECURITY] Remote access enabled on {_BIND_HOST} with API key enforcement and TLS mode {_TLS_MODE}.")
-        elif _FAIL_CLOSED_REMOTE_SECURITY:
-            print("[SECURITY] Remote access is configured to fail closed until API key/TLS requirements are satisfied.")
-        else:
-            print("[SECURITY] WARNING: Remote access is enabled without a fully closed security posture.")
-    app.run(debug=app.config.get("DEBUG", False), threaded=True, port=_PORT, host=_BIND_HOST, ssl_context=ssl_context)
+               if _REMOTE_SECURITY_READY:
+                     print(f"[SECURITY] Remote access enabled on {_BIND_HOST} with API key enforcement and TLS mode {_TLS_MODE}.")
+               elif _FAIL_CLOSED_REMOTE_SECURITY:
+                       print("[SECURITY] Remote access is configured to fail closed until API key/TLS requirements are satisfied.")
+               else:
+                        print("[SECURITY] WARNING: Remote access is enabled without a fully closed security posture.")
+
+@app.route("/favicon.ico")
+def favicon():
+    return send_from_directory(
+        os.path.join(app.root_path, "static"),
+        "favicon.ico",
+        mimetype="image/vnd.microsoft.icon",
+    )
+
+if __name__ == '__main__':
+    app.run(
+        debug=app.config.get("DEBUG", False),
+        threaded=True,
+        port=_PORT,
+        host=_BIND_HOST,
+        ssl_context=ssl_context,
+    )
+
+
+
+
+
+
+
+
+
+
+

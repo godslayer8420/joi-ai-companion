@@ -34,6 +34,7 @@ class MemorySystem:
         self._last_backup_file = ""
         self._last_resilience_error = ""
         self._memory_write_count = 0
+        self._cloud_root_failures = {}
         self._conversation_cipher = None
         self._conversation_encryption_enabled = False
         self._conversation_encryption_error = ""
@@ -58,6 +59,7 @@ class MemorySystem:
         self._in_self_repair = False
         self._profile_read_repair_attempted = False
         self._configure_resilience_paths()
+        self._configure_cloud_memory_offload()
         self._configure_conversation_encryption()
         self._repair_corrupted_db_if_needed()
         self.db = None
@@ -158,6 +160,108 @@ class MemorySystem:
                 self.backup_dir = str(backup_dir)
             except Exception:
                 self.backup_dir = ""
+
+    def _configure_cloud_memory_offload(self):
+        raw_sections = str(os.getenv("AURION_MEMORY_CLOUD_ROOTS", "")).strip()
+        manual_roots = []
+        if raw_sections:
+            for raw in re.split(r"[,;\n]+", raw_sections):
+                path = str(raw or "").strip()
+                if path:
+                    manual_roots.append(Path(path).expanduser())
+
+        if not manual_roots:
+            home_dir = Path.home()
+            d_drive_cloud_root = Path(r"D:\AurionData\CloudMemory")
+            if os.name == "nt" and Path("D:\\").exists():
+                manual_roots = [d_drive_cloud_root]
+            else:
+                manual_roots = []
+            manual_roots.extend([
+                home_dir / "OneDrive" / "AurionMemory",
+                home_dir / "Google Drive" / "AurionMemory",
+                home_dir / "Dropbox" / "AurionMemory",
+            ])
+
+        deduped = []
+        seen = set()
+        for path in manual_roots:
+            try:
+                normalized = str(path.expanduser().resolve())
+            except Exception:
+                normalized = str(path)
+            key = normalized.lower()
+            if not key or key in seen:
+                continue
+            if self._should_skip_cloud_root(path):
+                continue
+            seen.add(key)
+            deduped.append(path.expanduser())
+
+        self.cloud_memory_mode = str(os.getenv("AURION_MEMORY_CLOUD_MODE", "shadow")).strip().lower()
+        self.cloud_memory_roots = deduped
+        self.cloud_memory_offload_enabled = self.cloud_memory_mode not in ("off", "disabled", "false", "none") and bool(self.cloud_memory_roots)
+
+        if self.cloud_memory_offload_enabled:
+            for root in self.cloud_memory_roots:
+                try:
+                    root.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+
+    def _drive_has_headroom(self, anchor_path):
+        try:
+            target = Path(anchor_path).expanduser()
+            drive = target.drive or str(target.anchor or "")
+            if not drive:
+                return True
+            usage = shutil.disk_usage(drive)
+            return usage.free >= (512 * 1024 * 1024)
+        except Exception:
+            return True
+
+    def _should_skip_cloud_root(self, path):
+        try:
+            candidate = Path(path).expanduser()
+            normalized = str(candidate)
+        except Exception:
+            normalized = str(path)
+            candidate = Path(path)
+
+        lowered = normalized.lower()
+        if os.name == "nt" and Path("D:\\").exists():
+            if "\\onedrive\\" in lowered or "\\google drive\\" in lowered or "\\dropbox\\" in lowered:
+                return True
+        if not self._drive_has_headroom(candidate):
+            return True
+        return False
+
+    def _mark_cloud_root_failed(self, root, error):
+        key = str(root)
+        message = str(error)
+        previous = self._cloud_root_failures.get(key)
+        self._cloud_root_failures[key] = message
+        if previous == message:
+            return
+        print(f"[MemorySystem] Cloud memory sync failed for {root}: {error}")
+
+    def _sync_cloud_memory_snapshot(self):
+        if not self.cloud_memory_offload_enabled:
+            return
+        primary = Path(self.db_path)
+        if not primary.exists():
+            return
+        stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        for root in self.cloud_memory_roots:
+            if self._should_skip_cloud_root(root):
+                continue
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+                target = root / f"{primary.stem}.cloud_snapshot.{stamp}{primary.suffix}"
+                self._safe_copy_atomic(primary, target)
+                self._cloud_root_failures.pop(str(root), None)
+            except Exception as e:
+                self._mark_cloud_root_failed(root, e)
 
     def _configure_conversation_encryption(self):
         key_raw = str(os.getenv("AURION_MEMORY_ENCRYPTION_KEY", "")).strip()
@@ -507,6 +611,12 @@ class MemorySystem:
                 self._last_resilience_error = f"backup_failed:{e}"
                 print(f"[MemorySystem] Backup snapshot failed: {e}")
 
+            try:
+                self._sync_cloud_memory_snapshot()
+            except Exception as e:
+                self._last_resilience_error = f"cloud_sync_failed:{e}"
+                print(f"[MemorySystem] Cloud memory sync failed: {e}")
+
     def _mark_memory_written(self, reason="write"):
         self._memory_write_count += 1
         self._run_resilience_maintenance(force=False, reason=reason)
@@ -526,6 +636,7 @@ class MemorySystem:
             "last_secondary_sync_at": datetime.utcfromtimestamp(self._last_secondary_sync_at).isoformat() if self._last_secondary_sync_at else None,
             "write_count": int(self._memory_write_count),
             "last_error": self._last_resilience_error or None,
+            "cloud_memory_root_failures": dict(getattr(self, "_cloud_root_failures", {})),
             "conversation_encryption_enabled": bool(self._conversation_encryption_enabled),
             "conversation_encryption_error": self._conversation_encryption_error or None,
             "conversation_encryption_source": self._conversation_encryption_source,
@@ -752,8 +863,9 @@ class MemorySystem:
         primary_drive = str(primary.drive or "").upper()
         secondary_drive = str(secondary.drive or "").upper() if secondary else ""
         backup_drive = str(backup_root.drive or "").upper() if backup_root else ""
+        cloud_roots = [str(path) for path in getattr(self, "cloud_memory_roots", [])]
         return {
-            "policy": "Keep Aurion's active processing and persistent working memory on C for speed, while storing long-term memory mirrors and backups on D for capacity.",
+            "policy": "Keep Aurion's live memory on the fastest local path, shadow it to free cloud-backed storage when available, and keep archival copies on the safest secondary store.",
             "active_runtime_role": "primary live memory",
             "active_runtime_path": str(primary),
             "active_runtime_drive": primary_drive,
@@ -764,6 +876,9 @@ class MemorySystem:
             "backup_role": "archival memory snapshots",
             "backup_dir": str(backup_root) if backup_root else "",
             "backup_drive": backup_drive,
+            "cloud_memory_mode": getattr(self, "cloud_memory_mode", "shadow"),
+            "cloud_memory_roots": cloud_roots,
+            "cloud_memory_offload_enabled": getattr(self, "cloud_memory_offload_enabled", False),
             "active_memory_on_c": primary_drive.startswith("C:"),
             "long_term_memory_on_d": secondary_drive.startswith("D:") or backup_drive.startswith("D:"),
             "updated_at": datetime.utcnow().isoformat()
@@ -777,12 +892,14 @@ class MemorySystem:
         current = dict(profile.get("memory_architecture", {}) or {})
         changed = current != desired
         life_context = dict(profile.get("life_context", {}) or {})
-        summary = "Active memory lives on C for fast recall and processing; long-term memory mirrors and backups live on D for larger archival continuity."
+        summary = "Aurion keeps live memory on the fastest local path and shadows it into free cloud-backed storage when available, while keeping archival copies in secondary and backup stores."
         desired_life_context = {
             "memory_storage_policy": summary,
             "active_memory_path": desired.get("active_runtime_path", ""),
             "long_term_memory_path": desired.get("long_term_path", ""),
-            "backup_memory_dir": desired.get("backup_dir", "")
+            "backup_memory_dir": desired.get("backup_dir", ""),
+            "cloud_memory_mode": desired.get("cloud_memory_mode", "shadow"),
+            "cloud_memory_roots": json.dumps(desired.get("cloud_memory_roots", []), ensure_ascii=False)
         }
         for key, value in desired_life_context.items():
             if str(life_context.get(key, "")) != str(value):

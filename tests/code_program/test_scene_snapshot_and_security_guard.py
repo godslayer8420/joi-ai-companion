@@ -26,6 +26,17 @@ web_ui = pytest.importorskip(
 # background threads or leave the live-code-exec/self-edit surfaces enabled.
 # ---------------------------------------------------------------------------
 
+def test_budget_manager_prefers_custom_local_before_paid_services(monkeypatch):
+    pytest.importorskip("spacy")
+    monkeypatch.delenv("AURION_PROVIDER_PRIORITY", raising=False)
+    from joi_companion.core.personality_engine import BudgetManager
+    manager = BudgetManager()
+    ordered = manager.ordered_providers()
+    assert ordered[0] == "custom_local"
+    assert "openai" in ordered
+    assert "anthropic" in ordered
+
+
 def test_autonomy_threads_disabled_under_test_env():
     assert web_ui._ENABLE_AUTONOMY_THREADS is False
     assert web_ui._rc_push_thread is None
