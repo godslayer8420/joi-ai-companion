@@ -9,7 +9,7 @@
 
 param(
     [switch]$Force,
-    [string]$GGUFPath = "D:\Downloads\Ai\nuro-copilot-7b-GGUF\nuro-copilot-7b.Q4_K_S.gguf"
+    [string]$GGUFPath = "D:\bzimm\.lmstudio\models\orangejuicesmith\ouroboros-next\Ouroboros-Next-9B-Q4_K_M.gguf"
 )
 
 $RepoRoot   = Split-Path -Parent $MyInvocation.MyCommand.Path

@@ -211,6 +211,14 @@ class PersonalityEngine:
             self.aurion_brain.initialize()
         except Exception:
             self.aurion_brain = None
+        # ── Brain Ensemble (aurion + openmythos quantum-merged) ───────────────
+        self.brain_ensemble_enabled = (
+            str(os.getenv("AURION_BRAIN_ENSEMBLE_ENABLED", "true")).strip().lower() == "true"
+        )
+        self.brain_ensemble_models = [
+            m.strip() for m in str(os.getenv("AURION_BRAIN_ENSEMBLE_MODELS", "aurion,openmythos")).split(",")
+            if m.strip()
+        ]
         self.always_recall_mode = str(os.getenv("AURION_ALWAYS_RECALL_MODE", "true")).strip().lower() == "true"
         self.recall_personal_chars = max(1200, int(os.getenv("AURION_RECALL_PERSONAL_CHARS", "3200")))
         self.recall_global_chars = max(2200, int(os.getenv("AURION_RECALL_GLOBAL_CHARS", "12000")))
@@ -676,10 +684,17 @@ class PersonalityEngine:
             "gemini-3.1-pro": "gemini-3.1-pro-preview",
             "gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
             # ── Aurion brain (Ouroboros + OpenMythos + Quantum) ───────────────
-            "aurion-brain": "ouroboros",
-            "ouroboros": "ouroboros",
-            "openmythos": "ouroboros",
-            "quantum": "ouroboros",
+            "aurion-brain": "aurion",
+            "ouroboros": "aurion",
+            "ouroboros-next": "aurion",
+            "openmythos": "openmythos",
+            "qwythos": "openmythos",
+            "quantum": "aurion",
+            "saturn": "saturn-7b",
+            "saturn-7b": "saturn-7b",
+            "saturn-7.0": "saturn-7b",
+            "joi": "joi",
+            "joi-model": "joi",
         }
         return aliases.get(alias, str(model_name).strip())
 
@@ -2927,6 +2942,17 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
                 if cot_result:
                     return cot_result
 
+            # Brain ensemble (aurion + openmythos quantum-merged) — before single-model fallback
+            ensemble_result = self._generate_brain_ensemble_response(
+                user_text=user_text,
+                system_prompt=system_prompt,
+                messages=messages,
+                max_tokens=250,
+                temperature=0.72,
+            )
+            if ensemble_result:
+                return ensemble_result
+
             return self._call_llm(
                 messages,
                 max_tokens=250,
@@ -2936,6 +2962,78 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
         except Exception as e:
             print(f"[LLM Multi-Sentence Error] {e}")
         return None
+
+    def _generate_brain_ensemble_response(
+        self,
+        user_text: str,
+        system_prompt: str,
+        messages: list,
+        max_tokens: int = 280,
+        temperature: float = 0.72,
+    ) -> "str | None":
+        """
+        Quantum brain ensemble: call aurion (Ouroboros) + openmythos (Qwythos) in parallel,
+        then merge via quantum interference (Grover-amplified candidate selection).
+
+        Falls back gracefully to a single-model call if ensemble not available.
+        Only active when AURION_BRAIN_ENSEMBLE_ENABLED=true and both models are registered.
+        """
+        if not self.brain_ensemble_enabled or not self.use_llm:
+            return None
+        if len(self.brain_ensemble_models) < 2:
+            return None
+
+        import concurrent.futures
+
+        def call_model(model_name: str) -> "str | None":
+            try:
+                saved = self.llm_model
+                self.llm_model = self._normalize_model_alias(model_name)
+                resp = self._call_llm(
+                    messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature + (0.10 if model_name == "openmythos" else 0.0),
+                    system=system_prompt,
+                )
+                self.llm_model = saved
+                return resp
+            except Exception as e:
+                import logging
+                logging.getLogger("aurion.brain").debug("Ensemble model %s failed: %s", model_name, e)
+                return None
+
+        candidates = []
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                futures = {pool.submit(call_model, m): m for m in self.brain_ensemble_models[:2]}
+                for fut in concurrent.futures.as_completed(futures, timeout=45):
+                    result = fut.result()
+                    if result and len(result.strip()) > 10:
+                        candidates.append(result.strip())
+        except Exception:
+            pass
+
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        # Quantum interference merge: use Grover-amplified selection from aurion_brain
+        try:
+            from joi_companion.core.aurion_brain import get_brain
+            brain = get_brain()
+            scored = brain.quantum_router.quantum_parallel_search(candidates, n_parallel=2)
+            if scored:
+                winner, score = scored[0]
+                # If both scores close (< 0.05 difference), prefer longer (more depth)
+                if len(scored) > 1 and abs(scored[0][1] - scored[1][1]) < 0.05:
+                    winner = max(candidates, key=len)
+                return winner
+        except Exception:
+            pass
+
+        # Fallback: prefer the longer, more detailed response
+        return max(candidates, key=len)
 
     def generate_response(self, user_emotion, user_text=None, memory_system=None, user_name=None, speech_style="casual", rag_context=None, behavior_settings=None):
         user_name = self.sanitize_user_name(user_name)
