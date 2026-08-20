@@ -638,6 +638,12 @@ class PersonalityEngine:
             "gemma4-31b": "gemma-4-31b-it",
             "gemma-4-31b": "gemma-4-31b-it",
             "gemma-4-31b-it": "gemma-4-31b-it",
+            # ── Aurion canonical model name ────────────────────────────────────────
+            # "aurion" is THE name. No long model codes. Just aurion.
+            "aurion": "aurion",                                                 # Canonical Aurion model (ollama create aurion)
+            "aurion-local": "aurion",
+            "aurion-7b": "aurion",
+            "aurion-model": "aurion",
             # ── Voice models (Ollama + Windows TTS) ──────────────────────────────
             # Ollama voice models (nuro-voice is the primary working model)
             "aurion-voice": "nuro-voice",                                       # Aurion primary voice (Nuro 7B)
