@@ -1,4 +1,4 @@
-"""
+﻿"""
 aurion_unified_model.py  —  UNITY: Nine Voices, One Mind.
 
     LAYER 1 · SOUL   (φ⁰=1.000)   Voice 1 Ouroboros-9B  · Voice 2 Saturn-7B  · Voice 3 EVA-Qwen-7B
@@ -118,10 +118,37 @@ def _call_voice(
     tokens: int,
     ollama_base: str,
     lms_base: str,
+    ouroboros_base: str = "",
 ) -> Optional[str]:
-    """Single dispatcher — all providers share one path."""
+    """Single dispatcher -- all providers share one path."""
     temp_r = round(temp, TRINITY)
     try:
+        if voice.provider == "ouroboros":
+            # Route Voice 1 through the full Ouroboros sidecar.
+            # Falls back to Ollama direct if sidecar not running.
+            base = ouroboros_base or "http://127.0.0.1:8765"
+            try:
+                raw = _post(
+                    f"{base}/gateway/complete",
+                    {"model": voice.model_key, "messages": messages,
+                     "temperature": temp_r, "max_tokens": tokens, "stream": False},
+                    {"Content-Type": "application/json"},
+                    _TIMEOUT,
+                )
+                if raw and "content" in raw:
+                    return str(raw["content"]).strip() or None
+            except Exception:
+                pass
+            # Sidecar not up -- fall through to Ollama directly
+            raw = _post(
+                f"{ollama_base}/api/chat",
+                {"model": voice.model_key, "messages": messages, "stream": False,
+                 "options": {"temperature": temp_r, "num_predict": tokens}},
+                {"Content-Type": "application/json"},
+                _TIMEOUT,
+            )
+            return str(raw.get("message", {}).get("content") or "").strip() or None
+
         if voice.provider == "ollama":
             raw = _post(
                 f"{ollama_base}/api/chat",
@@ -137,7 +164,7 @@ def _call_voice(
                 f"{lms_base}/v1/chat/completions",
                 {"model": voice.model_key, "messages": messages, "stream": False,
                  "temperature": temp_r, "max_tokens": tokens},
-                {"Content-Type": "application/json", "Authorization": "Bearer lm-studio"},
+                {"Content-Type": "application/json", "Authorization": "Bearer lmstudio"},
                 _TIMEOUT,
             )
             return str((raw.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip() or None
@@ -169,13 +196,14 @@ class AurionUnifiedModel:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._ollama_base = os.getenv("AURION_OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
-        self._lms_base    = os.getenv("AURION_LMS_BASE_URL",    "http://localhost:1234").rstrip("/")
+        self._ollama_base     = os.getenv("AURION_OLLAMA_BASE_URL",     "http://localhost:11434").rstrip("/")
+        self._lms_base        = os.getenv("AURION_LMS_BASE_URL",        "http://localhost:1234").rstrip("/")
+        self._ouroboros_base  = os.getenv("AURION_OUROBOROS_BASE_URL",  "http://127.0.0.1:8765").rstrip("/")
 
         # ── 9 voices across 3 layers (3-6-9) ──────────────────────────────────
         self.voices: List[VoiceLayer] = [
             # LAYER 1 — SOUL  (temp 0.333 · tokens ×0.999)
-            VoiceLayer("ouroboros",   os.getenv("AURION_VOICE_1", "ouroboros-next"),     1, 1, TEMP_ANCHOR,   _T999),
+            VoiceLayer("ouroboros",   os.getenv("AURION_VOICE_1", "ouroboros-next"),     1, 1, TEMP_ANCHOR,   _T999, provider="ouroboros"),
             VoiceLayer("saturn",      os.getenv("AURION_VOICE_2", "saturn-7b"),          1, 2, TEMP_ANCHOR,   _T666),
             VoiceLayer("eva",         os.getenv("AURION_VOICE_3", "eva-7b"),             1, 3, TEMP_ANCHOR,   _T333),
             # LAYER 2 — REASON (temp 0.666 · tokens ×0.666)
@@ -220,7 +248,8 @@ class AurionUnifiedModel:
         results = {}
         for v in self.voices:
             resp = _call_voice(v, [{"role": "user", "content": "ping"}],
-                               TEMP_ANCHOR, TRINITY, self._ollama_base, self._lms_base)
+                               TEMP_ANCHOR, TRINITY, self._ollama_base, self._lms_base,
+                               self._ouroboros_base)
             v.available = resp is not None
             results[v.name] = v.available
         self._initialized = any(results.values())
@@ -268,7 +297,9 @@ class AurionUnifiedModel:
             text: Optional[str] = None
 
             for attempt in range(TRINITY):  # retry 3 times, 3→6→9 s
-                text = _call_voice(voice, messages, v_temp, v_tokens, self._ollama_base, self._lms_base)
+                text = _call_voice(voice, messages, v_temp, v_tokens,
+                                    self._ollama_base, self._lms_base,
+                                    self._ouroboros_base)
                 if text:
                     break
                 if attempt < TRINITY - 1:
