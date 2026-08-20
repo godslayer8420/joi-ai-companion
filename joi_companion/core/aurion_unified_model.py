@@ -5,10 +5,10 @@ aurion_unified_model.py  —  UNITY: Nine Voices, One Mind.
     LAYER 2 · REASON (φ⁻¹=0.618)  Voice 4 OpenMythos-9B · Voice 5 Gemma3-12B · Voice 6 Gemma4-26B
     LAYER 3 · HEART  (φ⁻²=0.382)  Voice 7 Nuro-7B       · Voice 8 Joi-Gemma-1B· Voice 9 Gemma4-Voice
 
-    Temperatures : 0.333 / 0.666 / 0.888 / 1.000
-    Tokens       : 333 / 666 / 999
-    Retries      : 3 s → 6 s → 9 s
-    Memory gates : 6 (HARMONY)
+    Temperatures  : 0.333 / 0.666 / 0.888 / 1.000
+    Token ratios  : 0.333 / 0.666 / 0.999  (applied to TOKEN_BUDGET)
+    Retries       : 3 s → 6 s → 9 s
+    Memory gates  : 6 (HARMONY)
 """
 
 from __future__ import annotations
@@ -37,9 +37,14 @@ except Exception:
     _SG = False
 
 # Sacred numeric constants — nothing arbitrary
-_T333, _T666, _T999 = 333, 666, 999           # token ceilings
-_RETRIES = (TRINITY, HARMONY, UNITY)           # 3→6→9 s back-off
-_TIMEOUT = UNITY * 10                          # 90 s per call
+# Token ratios: 0.333 / 0.666 / 0.999 applied to TOKEN_BUDGET to get integer counts
+TOKEN_BUDGET   = int(os.getenv("AURION_TOKEN_BUDGET", "2000"))  # total budget per call
+_R333, _R666, _R999 = 0.333, 0.666, 0.999                       # sacred ratios
+_T333 = max(1, round(TOKEN_BUDGET * _R333))                      # ~666 at budget=2000
+_T666 = max(1, round(TOKEN_BUDGET * _R666))                      # ~1332
+_T999 = max(1, round(TOKEN_BUDGET * _R999))                      # ~1998
+_RETRIES = (TRINITY, HARMONY, UNITY)                             # 3→6→9 s back-off
+_TIMEOUT = UNITY * 10                                            # 90 s per call
 
 # Nine-voice φ-decay weights: LayerMult × VoiceMult
 _L1, _L2, _L3 = 1.0, PHI_CONJUGATE, PHI_CONJUGATE**2
