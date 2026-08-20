@@ -45,3 +45,22 @@ def test_memory_resilience_reliability_score_is_bounded():
     score = rel.get("score")
     assert isinstance(score, (int, float))
     assert 0.0 <= float(score) <= 1.0
+
+def test_memory_resilience_reliability_tier_matches_score():
+    ms = MemorySystem()
+    status = ms.get_memory_resilience_status()
+    rel = status.get("reliability") or {}
+
+    assert "score" in rel
+    assert "tier" in rel
+
+    score = float(rel["score"])
+    tier = rel["tier"]
+
+    assert tier in {"high", "medium", "low"}
+    if score >= 0.99:
+        assert tier == "high"
+    elif score >= 0.66:
+        assert tier == "medium"
+    else:
+        assert tier == "low"
