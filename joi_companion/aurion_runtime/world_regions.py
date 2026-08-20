@@ -13,6 +13,7 @@ Basement layers (multi-level underground):
   Layer 2 — Neon District (cyberpunk market)
   Layer 3 — Fight Arena  (battle tournaments)
   Layer 4 — Kart Circuit  (racing track)
+  Layer 5 — Rhythm Venue  (Rock Band-style rhythm games)
 
 Procedural content uses its own world_memory.db — not Aurion's personal memory.
 """
@@ -29,6 +30,7 @@ R_FESTIVAL        = "festival_grounds"
 R_ALIEN_PRESERVE  = "alien_preserve"
 R_BASEMENT_ARENA  = "basement_arena"
 R_KART_CIRCUIT    = "kart_circuit"
+R_RHYTHM_VENUE    = "rhythm_venue"
 R_DEEP_WILD       = "deep_wild"
 
 
@@ -235,6 +237,31 @@ REGIONS: Dict[str, Dict[str, Any]] = {
         },
     ),
 
+    R_RHYTHM_VENUE: _region(
+        rid=R_RHYTHM_VENUE,
+        name="Rhythm Venue",
+        biome="underground_concert_hall",
+        atmosphere="pulsing stage lights, bass-heavy air, crowd roar, fog machines, holographic stage effects",
+        level_range=(1, 99),
+        unreal_level="/Game/Levels/Basement/Layer5_RhythmVenue",
+        alien_spawns=["beat_phantom", "frequency_imp", "resonance_wyvern"],
+        npc_density="high",
+        loot_tier=5,
+        ecology_type="performance_underground",
+        ambient_music="ambient_rhythm_venue_idle",
+        seed=963,
+        special={
+            "instruments": ["guitar", "bass", "drums", "keys", "vocals"],
+            "input_devices": ["controller_guitar", "midi_drums", "midi_keyboard", "microphone"],
+            "custom_track_import": True,
+            "track_analysis_engine": "librosa",
+            "ghost_replays": True,
+            "star_power_system": True,
+            "band_size_max": 6,  # HARMONY
+            "basement_layer": 5,
+        },
+    ),
+
     R_DEEP_WILD: _region(
         rid=R_DEEP_WILD,
         name="The Deep Wild",
@@ -269,7 +296,8 @@ NODES: Dict[str, List[str]] = {
     R_FESTIVAL:       [R_SURFACE_CITY, R_ALIEN_PRESERVE],
     R_ALIEN_PRESERVE: [R_FESTIVAL, R_VOID_LAYER, R_DEEP_WILD],
     R_BASEMENT_ARENA: [R_UNDERGROUND, R_KART_CIRCUIT],
-    R_KART_CIRCUIT:   [R_UNDERGROUND, R_BASEMENT_ARENA],
+    R_KART_CIRCUIT:   [R_UNDERGROUND, R_BASEMENT_ARENA, R_RHYTHM_VENUE],
+    R_RHYTHM_VENUE:   [R_KART_CIRCUIT, R_UNDERGROUND],
     R_DEEP_WILD:      [R_VOID_LAYER, R_ALIEN_PRESERVE],
 }
 
