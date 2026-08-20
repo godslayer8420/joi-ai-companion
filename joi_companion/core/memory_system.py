@@ -2515,6 +2515,12 @@ def _aurion_enriched_get_memory_resilience_status(self):
         reliability["tier"] = "high"
     elif reliability["score"] >= 0.66:
         reliability["tier"] = "medium"
+    reliability["score"] = round(sum(1 for c in checks if c) / max(len(checks), 1), 3)
+
+    if reliability["score"] >= 0.99:
+        reliability["tier"] = "high"
+    elif reliability["score"] >= 0.66:
+        reliability["tier"] = "medium"
     else:
         reliability["tier"] = "low"
 
@@ -2524,5 +2530,6 @@ def _aurion_enriched_get_memory_resilience_status(self):
 
 if _aurion_original_get_memory_resilience_status is not None:
     MemorySystem.get_memory_resilience_status = _aurion_enriched_get_memory_resilience_status
+
 
 

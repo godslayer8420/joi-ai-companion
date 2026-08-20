@@ -64,3 +64,17 @@ def test_memory_resilience_reliability_tier_matches_score():
         assert tier == "medium"
     else:
         assert tier == "low"
+
+def test_memory_resilience_reliability_summary_is_stable():
+    ms = MemorySystem()
+    status = ms.get_memory_resilience_status()
+    rel = status.get("reliability") or {}
+
+    assert "summary" in rel
+    summary = rel["summary"]
+    assert isinstance(summary, str)
+    assert "tier=" in summary
+    assert "score=" in summary
+    assert "runtime_path=" in summary
+    assert "long_term_path=" in summary
+    assert "backup_dir=" in summary
