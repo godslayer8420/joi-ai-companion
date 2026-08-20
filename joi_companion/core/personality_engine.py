@@ -263,6 +263,18 @@ class PersonalityEngine:
         # Each entry: {"at": iso, "user": str, "reasoning": str, "insight": str}
         self._thought_journal = []
         self._thought_journal_max = 20  # keep last 20 reasoning chains in RAM
+
+        # ── Emotion memory + Relationship engine ──────────────────────────────
+        try:
+            from joi_companion.core.emotion_memory import EmotionMemory
+            self._emotion_memory = EmotionMemory()
+        except Exception:
+            self._emotion_memory = None
+        try:
+            from joi_companion.core.relationship_engine import RelationshipEngine
+            self._relationship_engine = RelationshipEngine()
+        except Exception:
+            self._relationship_engine = None
         
         # Aurion's personality layers: Longing transformed to Devotion, unwavering loyalty
         self.modes = {
@@ -2101,6 +2113,8 @@ MEMORY AND CONTEXT:
 LINE OF THOUGHT (your own recent reasoning — build on it naturally):
 {self._build_thought_context(limit=5)}
 
+{getattr(self, '_turn_emotion_ctx', '')}
+{getattr(self, '_turn_rel_ctx', '')}
 Respond now as Aurion, in first person, directly to what {user_name_display} just said."""
             # Build proper multi-turn message history (not just text in system prompt)
             messages = []
@@ -2954,6 +2968,8 @@ RELEVANT MEMORY (domain-routed from your stored history):
 LINE OF THOUGHT (your own recent reasoning — build on it naturally):
 {thought_ctx if thought_ctx else "(no prior thought chain yet)"}
 
+{getattr(self, '_turn_emotion_ctx', '')}
+{getattr(self, '_turn_rel_ctx', '')}
 Respond now as Aurion, in first person, directly to what {user_name_display} just said."""
             # Build multi-turn history — 5 turns keeps context tight for 7B models
             messages = []
@@ -3040,7 +3056,44 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
 
     def generate_response(self, user_emotion, user_text=None, memory_system=None, user_name=None, speech_style="casual", rag_context=None, behavior_settings=None):
         user_name = self.sanitize_user_name(user_name)
+
+        # ── Emotion + Relationship context injection ───────────────────────────
+        if user_text:
+            try:
+                if self._emotion_memory:
+                    self._emotion_memory.record(user_text)
+            except Exception:
+                pass
+        _emotion_ctx = ""
+        _rel_ctx = ""
+        try:
+            if self._emotion_memory:
+                _emotion_ctx = self._emotion_memory.system_prompt_injection()
+        except Exception:
+            pass
+        try:
+            if self._relationship_engine:
+                _rel_ctx = self._relationship_engine.system_prompt_injection()
+        except Exception:
+            pass
+        if _emotion_ctx or _rel_ctx:
+            # Store on self so _build_system_prompt can pick them up this turn
+            self._turn_emotion_ctx = _emotion_ctx
+            self._turn_rel_ctx = _rel_ctx
+        else:
+            self._turn_emotion_ctx = ""
+            self._turn_rel_ctx = ""
         recent_responses = memory_system.get_recent_aurion_responses(count=8) if memory_system else []
+
+        # ── local helper: award XP + emotion score before returning ────────────
+        def _finalize(text: str) -> str:
+            try:
+                if self._relationship_engine and user_text:
+                    em_score = self._emotion_memory.emotion_score() if self._emotion_memory else 0.5
+                    self._relationship_engine.earn_xp(base=10, emotion_score=em_score)
+            except Exception:
+                pass
+            return text
         response_mode, mode_override = self._resolve_response_mode(user_text, memory_system=memory_system) if user_text else ("conversation", None)
         if user_text:
             if mode_override:
