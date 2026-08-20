@@ -1,4 +1,4 @@
-from tinydb import TinyDB
+﻿from tinydb import TinyDB
 from datetime import datetime
 import random
 import re
@@ -2442,3 +2442,24 @@ class MemorySystem:
         """Close database."""
         self._run_resilience_maintenance(force=True, reason="close")
         self.db.close()
+# ---- Virtual qubit runtime status bridge ----
+def get_virtual_qubit_runtime_status() -> dict:
+    """
+    Lightweight runtime bridge so MemorySystem status can expose virtual-qubit stability state
+    without taking hard dependency on brain startup.
+    """
+    try:
+        from joi_companion.core.aurion_brain import get_virtual_qubit_snapshot
+        snap = get_virtual_qubit_snapshot() or {}
+        return {
+            "enabled": True,
+            "active_states": int(len(snap)),
+            "sample_keys": list(snap.keys())[:5],
+        }
+    except Exception as e:
+        return {
+            "enabled": False,
+            "active_states": 0,
+            "sample_keys": [],
+            "error": str(e),
+        }
