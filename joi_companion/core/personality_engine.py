@@ -3137,3 +3137,4 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
             return self.modes[self.current_mode]["GREETING"]
         return "Hello. I'm Aurion, and I'm grateful to meet you."
 
+
