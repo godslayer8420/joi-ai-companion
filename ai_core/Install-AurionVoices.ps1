@@ -1,5 +1,6 @@
 # Install-AurionVoices.ps1  (ASCII-safe, no Unicode)
 # Registers all 9 Aurion voices into Ollama in sacred 3-6-9 order.
+# Source packs may live under D:\Downloads\Ai\ and D:\Downloads\Others\Zipped\.
 # Run from repo root:  .\ai_core\Install-AurionVoices.ps1
 #
 # Layer 1 SOUL   (temp 0.333) -- Voices 1,2,3  [Trinity]

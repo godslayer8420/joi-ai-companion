@@ -35,8 +35,10 @@ python joi_companion/web_ui.py
 - These voices become available to Aurion for voice output
 
 **Voice pack locations:**
-- `D:\Downloads\Others\MicrosoftWindows.Voice.en-US.Aria.2_*.Msix`
-- `D:\Downloads\Others\MicrosoftWindows.Voice.en-US.Jenny.2_*.Msix`
+- `D:\Downloads\Others\MicrosoftWindows.Voice.en-US.Aria.1_1.0.8.0_x64__cw5n1h2txyewy.Msix`
+- `D:\Downloads\Others\MicrosoftWindows.Voice.en-US.Aria.2_1.0.1.0_x64__cw5n1h2txyewy.Msix`
+- `D:\Downloads\Others\MicrosoftWindows.Voice.en-US.Jenny.1_1.0.8.0_x64__cw5n1h2txyewy.Msix`
+- `D:\Downloads\Others\MicrosoftWindows.Voice.en-US.Jenny.2_1.0.1.0_x64__cw5n1h2txyewy.Msix`
 
 **Usage:**
 ```powershell
@@ -111,6 +113,14 @@ D:\bzimm\.local\bin\jupyter
 C:\Python311\Scripts\jupyter.exe
 C:\Users\bzimm\AppData\Local\Programs\Python\Python311\Scripts\jupyter.exe
 <WSL Ubuntu/Debian>
+```
+
+**Useful asset roots:**
+```
+D:\Downloads\Ai\
+D:\Downloads\Others\Zipped\
+D:\Downloads\Others\Aurion files\
+D:\Downloads\Others\makehuman-community-1.3.0-windows\
 ```
 
 **Usage:**
