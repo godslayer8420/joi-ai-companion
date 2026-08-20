@@ -28,7 +28,7 @@ $voices = @(
     # ── LAYER 2 · REASON (Harmony · temp 0.666) ──────────────────────
     @{ tag="openmythos";     file="openmythos_modelfile.txt";     num=4; layer="REASON"; role="Creative depth · mythos weave" },
     @{ tag="gemma3-voice";   file="gemma3_voice_modelfile.txt";   num=5; layer="REASON"; role="Knowledge · grounded recall" },
-    # Voice 6 (gemma4-27b) served by LM Studio — skip Ollama registration
+    @{ tag="qwen3-reason";   file="qwen3_modelfile.txt";          num=6; layer="REASON"; role="Synthesis · structured reasoning" },
     # ── LAYER 3 · HEART (Unity · temp 0.888) ─────────────────────────
     @{ tag="nuro-voice";     file="nuro_voice_modelfile.txt";     num=7; layer="HEART";  role="Intimate warmth · copilot" },
     @{ tag="joi";            file="joi_modelfile.txt";            num=8; layer="HEART";  role="Companionship · heart" },
@@ -67,8 +67,6 @@ Write-Host ""
 Write-Host "══════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host "  Registered: $ok   Failed: $fail   Skipped: $skip" -ForegroundColor $(if ($fail -eq 0) { "Green" } else { "Yellow" })
 Write-Host ""
-Write-Host "  Voice 6 (gemma4-27b) → served by LM Studio on localhost:1234" -ForegroundColor DarkGray
-Write-Host "  Set AURION_VOICE_6 in .env if the LM Studio model tag differs." -ForegroundColor DarkGray
-Write-Host ""
+Write-Host "  All 9 voices run via Ollama. No external servers required." -ForegroundColor DarkGray
 Write-Host "  Run  ollama list  to verify all voices are registered." -ForegroundColor Cyan
 Write-Host "══════════════════════════════════════════════════════" -ForegroundColor Cyan

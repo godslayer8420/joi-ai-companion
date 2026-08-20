@@ -181,7 +181,7 @@ class AurionUnifiedModel:
             # LAYER 2 — REASON (temp 0.666 · tokens ×0.666)
             VoiceLayer("openmythos",  os.getenv("AURION_VOICE_4", "openmythos"),         2, 1, TEMP_HARMONIC, _T999),
             VoiceLayer("gemma3_12b",  os.getenv("AURION_VOICE_5", "gemma3-voice"),       2, 2, TEMP_HARMONIC, _T666),
-            VoiceLayer("gemma4_26b",  os.getenv("AURION_VOICE_6", "gemma4-27b"),         2, 3, TEMP_HARMONIC, _T333, "lmstudio"),
+            VoiceLayer("gemma4_26b",  os.getenv("AURION_VOICE_6", "qwen3-reason"),        2, 3, TEMP_HARMONIC, _T333),
             # LAYER 3 — HEART (temp 0.888 · tokens ×0.333)
             VoiceLayer("nuro",        os.getenv("AURION_VOICE_7", "nuro-voice"),         3, 1, TEMP_CREATIVE, _T666),
             VoiceLayer("joi",         os.getenv("AURION_VOICE_8", "joi"),                3, 2, TEMP_CREATIVE, _T333),
