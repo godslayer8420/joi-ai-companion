@@ -1,3 +1,32 @@
+﻿
+import os
+import time
+
+def _is_free_local_provider(provider: str) -> bool:
+    p = (provider or "").strip().lower()
+    return p in {"ollama", "custom_local", "lmstudio", "local"}
+
+def _paid_unlock_window_ok() -> bool:
+    """
+    Paid providers require explicit operator authorization:
+      AURION_PAID_AUTH_TOKEN=I_UNDERSTAND_PAID_COST
+      AURION_PAID_AUTH_EXPIRES_UNIX=<epoch seconds in near future>
+    """
+    token = os.getenv("AURION_PAID_AUTH_TOKEN", "")
+    exp = os.getenv("AURION_PAID_AUTH_EXPIRES_UNIX", "")
+    if token != "I_UNDERSTAND_PAID_COST":
+        return False
+    try:
+        return int(exp) > int(time.time())
+    except Exception:
+        return False
+
+def enforce_free_first_provider(selected_provider: str) -> str:
+    provider = (selected_provider or "").strip()
+    if _is_free_local_provider(provider):
+        return provider
+    # hard fail-closed for paid unless explicit, time-bounded authorization is present
+    return provider if _paid_unlock_window_ok() else "ollama"
 import random
 import spacy
 import os
@@ -3107,3 +3136,4 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
         if self.current_mode in self.modes:
             return self.modes[self.current_mode]["GREETING"]
         return "Hello. I'm Aurion, and I'm grateful to meet you."
+
