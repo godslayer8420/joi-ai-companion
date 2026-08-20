@@ -620,13 +620,29 @@ class PersonalityEngine:
             "gemma4-31b": "gemma-4-31b-it",
             "gemma-4-31b": "gemma-4-31b-it",
             "gemma-4-31b-it": "gemma-4-31b-it",
-            # ── Voice models (Ollama) ───────────────────────────────────────────
+            # ── Voice models (Ollama + Windows TTS) ──────────────────────────────
             # Ollama voice models (nuro-voice is the primary working model)
             "aurion-voice": "nuro-voice",                                       # Aurion primary voice (Nuro 7B)
             "aurora-voice": "nuro-voice",                                       # Aurion alias
             "nuro-voice": "nuro-voice",                                         # Nuro Copilot 7B voice
             "nuro-copilot-voice": "nuro-voice",
+            "nuro-copilot-7b": "nuro-voice",
+            "nuro-7b-voice": "nuro-voice",
             "voice": "nuro-voice",
+            # Gemma 3 12B voice assistant (Ollama)
+            "gemma-3-voice": "gemma-3-12b-voice",
+            "gemma-3-12b-voice": "gemma-3-12b-voice",
+            "gemma-3-12b-voice-assistant": "gemma-3-12b-voice",
+            "gemma-voice": "gemma-3-12b-voice",
+            # Windows TTS voice packs (registered via Add-AppxPackage PowerShell)
+            "aria": "windows-aria-tts-v2",
+            "aria-tts": "windows-aria-tts-v2",
+            "aria-en-us": "windows-aria-tts-v2",
+            "windows-aria": "windows-aria-tts-v2",
+            "jenny": "windows-jenny-tts-v2",
+            "jenny-tts": "windows-jenny-tts-v2",
+            "jenny-en-us": "windows-jenny-tts-v2",
+            "windows-jenny": "windows-jenny-tts-v2",
             # ── Gemini free models (Google AI Studio — project: Aurion) ───────
             "gemini-flash": "gemini-3-flash-preview",
             "gemini3-flash": "gemini-3-flash-preview",

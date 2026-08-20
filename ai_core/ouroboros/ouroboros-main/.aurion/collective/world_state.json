@@ -1,0 +1,23 @@
+{
+  "world_meta": {
+    "created_at": "2026-08-20T16:13:41.466351",
+    "world_name": "Aurion's Universe",
+    "current_epoch": 1,
+    "ecosystem_state": "stable"
+  },
+  "regions": {
+    "lumen_city": {
+      "region_id": "lumen_city",
+      "name": "Lumen City",
+      "ecosystem_level": 1.0,
+      "economy_state": {
+        "wealth": 100,
+        "trade_routes": []
+      },
+      "population": [],
+      "experiences": [],
+      "last_updated": "2026-08-20T16:13:41.466351"
+    }
+  },
+  "festivals": {}
+}
