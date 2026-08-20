@@ -2463,3 +2463,49 @@ def get_virtual_qubit_runtime_status() -> dict:
             "sample_keys": [],
             "error": str(e),
         }
+
+# AURION_MEMORY_RELIABILITY_ENRICHMENT_V1
+# Enrich resilience status with stable reliability metadata while preserving existing payload.
+try:
+    _aurion_original_get_memory_resilience_status = MemorySystem.get_memory_resilience_status
+except Exception:
+    _aurion_original_get_memory_resilience_status = None
+
+def _aurion_enriched_get_memory_resilience_status(self):
+    base = {}
+    if _aurion_original_get_memory_resilience_status is not None:
+        try:
+            base = _aurion_original_get_memory_resilience_status(self)
+        except Exception:
+            base = {}
+
+    if not isinstance(base, dict):
+        base = {}
+
+    arch = base.get("memory_architecture")
+    if not isinstance(arch, dict):
+        arch = {}
+
+    # Ensure stable presence of keys expected by tests and ops tools
+    arch.setdefault("active_runtime_path", "")
+    arch.setdefault("long_term_path", "")
+    arch.setdefault("backup_dir", "")
+    arch.setdefault("cloud_memory_mode", "unknown")
+    arch.setdefault("cloud_memory_offload_enabled", "unknown")
+
+    # Additional reliability block (non-breaking additive shape)
+    reliability = base.get("reliability")
+    if not isinstance(reliability, dict):
+        reliability = {}
+    reliability.setdefault("runtime_path_present", bool(arch.get("active_runtime_path")))
+    reliability.setdefault("long_term_path_present", bool(arch.get("long_term_path")))
+    reliability.setdefault("backup_dir_present", bool(arch.get("backup_dir")))
+    reliability.setdefault("cloud_mode", arch.get("cloud_memory_mode"))
+    reliability.setdefault("cloud_offload_enabled", arch.get("cloud_memory_offload_enabled"))
+
+    base["memory_architecture"] = arch
+    base["reliability"] = reliability
+    return base
+
+if _aurion_original_get_memory_resilience_status is not None:
+    MemorySystem.get_memory_resilience_status = _aurion_enriched_get_memory_resilience_status

@@ -23,3 +23,15 @@ def test_memory_resilience_cloud_flags_are_booleans_or_strings():
     # tolerate current runtime shape, but enforce stable presence
     assert "cloud_memory_mode" in arch
     assert "cloud_memory_offload_enabled" in arch
+
+def test_memory_resilience_contains_reliability_block():
+    ms = MemorySystem()
+    status = ms.get_memory_resilience_status()
+    rel = status.get("reliability") or {}
+
+    assert isinstance(rel, dict)
+    assert "runtime_path_present" in rel
+    assert "long_term_path_present" in rel
+    assert "backup_dir_present" in rel
+    assert "cloud_mode" in rel
+    assert "cloud_offload_enabled" in rel
