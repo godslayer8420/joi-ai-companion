@@ -1,9 +1,11 @@
-﻿
+
 # ---- Virtual qubit stability layer (local deterministic envelope) ----
 try:
     from joi_companion.core.virtual_qubit_stability import build_virtual_qubit_stability_from_env
 except Exception:
-    build_virtual_qubit_stability_from_env = None"""
+    build_virtual_qubit_stability_from_env = None
+
+"""
 aurion_brain.py — Aurion's personal AI brain integration layer
 
 Wires together:
@@ -512,11 +514,27 @@ class AurionBrain:
         self.memory_bridge = OuroborosMemoryBridge()
         self.runpod_url = os.getenv("AURION_CUSTOM_LOCAL_BASE_URL", "").rstrip("/")
         self._initialized = False
+
+        # ── QuantumCognitionEngine integration (Phase 1: quantum-inspired) ────────
+        # Lazy-wired so missing deps (numpy) don't block brain startup.
+        self._qce: Optional[Any] = None
+        try:
+            from joi_companion.core.quantum_cognition import QuantumCognitionEngine  # noqa: PLC0415
+            self._qce = QuantumCognitionEngine(
+                memory_router=None,   # injected later by memory_system if available
+                memory_system=None,
+                mode=os.getenv("AURION_QUANTUM_MODE", "QUANTUM_INSPIRED"),
+            )
+            logger.info("QuantumCognitionEngine wired (mode=%s)", self._qce.mode)
+        except Exception as _qce_err:
+            logger.debug("QuantumCognitionEngine unavailable: %s", _qce_err)
+
         logger.info(
-            "AurionBrain init | config=%dB-class | runpod=%s | stable=%s",
+            "AurionBrain init | config=%dB-class | runpod=%s | stable=%s | qce=%s",
             self.config.dim,
             "yes" if self.runpod_url else "no",
             self.config.spectral_radius_stable(),
+            "yes" if self._qce else "no",
         )
 
     def initialize(self) -> bool:
@@ -579,11 +597,30 @@ class AurionBrain:
         """
         tokens = message.split()
 
-        # Step 1: Quantum routing
+        # Step 1: Quantum routing (QuantumLogicRouter — gate-level, fast)
         routing = self.quantum_router.route(
             query_tokens=tokens,
             context_depth=len(history) if history else 1,
         )
+
+        # Step 1b: QuantumCognitionEngine reasoning (domain routing + memory oracle)
+        qce_result: Dict[str, Any] = {}
+        if self._qce is not None:
+            try:
+                qce_result = self._qce.reason(
+                    query=message,
+                    context={
+                        "gates": routing.get("gates_applied", []),
+                        "session_id": session_id,
+                        "explore_mode": len(tokens) < TRINITY,  # short queries → superposition
+                    },
+                )
+                # Inject QCE-selected domain into routing hints
+                routing["qce_domain"] = qce_result.get("selected_domain", "")
+                routing["qce_confidence"] = qce_result.get("confidence", 0.5)
+                routing["qce_path"] = qce_result.get("reasoning_path", "")
+            except Exception as _qce_err:
+                logger.debug("QCE reasoning skipped: %s", _qce_err)
 
         # Step 2: Memory
         memory = self.memory_bridge.load_memory(session_id)
@@ -598,6 +635,8 @@ class AurionBrain:
             memory_context=memory_context,
             loop_depth=loop_depth,
             gates=routing["gates_applied"],
+            qce_domain=routing.get("qce_domain", ""),
+            qce_confidence=routing.get("qce_confidence", 0.0),
         )
 
         # Step 4: Route to RunPod or local
@@ -618,6 +657,7 @@ class AurionBrain:
         return {
             "response": response,
             "quantum_routing": routing,
+            "qce_result": qce_result,
             "memory_used": bool(memory_context),
             "loop_depth": loop_depth,
             "parallel_paths": n_parallel,
@@ -632,13 +672,15 @@ class AurionBrain:
         }
 
     def _build_augmented_prompt(
-        self, message: str, memory_context: str, loop_depth: int, gates: List[str]
+        self, message: str, memory_context: str, loop_depth: int, gates: List[str],
+        qce_domain: str = "", qce_confidence: float = 0.0,
     ) -> str:
         """Inject quantum routing and memory context into the prompt."""
         parts = []
         if memory_context:
             parts.append(f"[Memory context]\n{memory_context.strip()[-800:]}\n")
-        parts.append(f"[Quantum routing: gates={gates}, loop_depth={loop_depth}]")
+        qce_hint = f", qce_domain={qce_domain}({qce_confidence:.2f})" if qce_domain else ""
+        parts.append(f"[Quantum routing: gates={gates}, loop_depth={loop_depth}{qce_hint}]")
         parts.append(message)
         return "\n".join(parts)
 
