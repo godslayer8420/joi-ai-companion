@@ -35,3 +35,13 @@ def test_memory_resilience_contains_reliability_block():
     assert "backup_dir_present" in rel
     assert "cloud_mode" in rel
     assert "cloud_offload_enabled" in rel
+
+def test_memory_resilience_reliability_score_is_bounded():
+    ms = MemorySystem()
+    status = ms.get_memory_resilience_status()
+    rel = status.get("reliability") or {}
+
+    assert "score" in rel
+    score = rel.get("score")
+    assert isinstance(score, (int, float))
+    assert 0.0 <= float(score) <= 1.0

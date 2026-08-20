@@ -2503,9 +2503,18 @@ def _aurion_enriched_get_memory_resilience_status(self):
     reliability.setdefault("cloud_mode", arch.get("cloud_memory_mode"))
     reliability.setdefault("cloud_offload_enabled", arch.get("cloud_memory_offload_enabled"))
 
+    # bounded reliability score [0,1]
+    checks = [
+        bool(reliability.get("runtime_path_present")),
+        bool(reliability.get("long_term_path_present")),
+        bool(reliability.get("backup_dir_present")),
+    ]
+    reliability["score"] = round(sum(1 for c in checks if c) / max(len(checks), 1), 3)
+
     base["memory_architecture"] = arch
     base["reliability"] = reliability
     return base
 
 if _aurion_original_get_memory_resilience_status is not None:
     MemorySystem.get_memory_resilience_status = _aurion_enriched_get_memory_resilience_status
+
