@@ -88,11 +88,37 @@ class RoutedMemoryStore:
         }
     
     def retrieve_from_domain(self, domain, namespace=None, limit=10):
-        """Retrieve entries from a specific domain/namespace."""
+        """Retrieve entries from a specific domain/namespace via memory_system search."""
         namespace = namespace or MemoryDomains.DEFAULT_NAMESPACE
-        key = f"{domain}:{namespace}"
-        # In real implementation, queries memory_system for entries with this domain:namespace tag
-        return []
+
+        if not self.memory_system:
+            return []
+
+        # Map domain → keywords to search conversations for contextually relevant entries
+        _domain_keywords = {
+            "personal.episodic": ["remember", "happened", "day", "moment", "we", "talked"],
+            "personal.conversation": ["said", "told", "message", "discussed", "asked"],
+            "personal.image": ["image", "photo", "picture", "screenshot", "visual", "showed"],
+            "collective.regional": ["region", "area", "city", "world", "lumen_city", "tribe"],
+            "collective.festival": ["festival", "celebration", "event", "ceremony", "gathering"],
+            "collective.economy": ["trade", "commerce", "resource", "market", "wealth", "goods"],
+            "collective.ecosystem": ["ecology", "nature", "forest", "species", "climate", "wildlife"],
+            "knowledge.skill": ["skill", "ability", "technique", "method", "how to", "capability"],
+            "knowledge.fact": ["fact", "know", "learned", "information", "definition", "concept"],
+            "knowledge.rule": ["rule", "law", "principle", "regulation", "policy", "constraint"],
+        }
+
+        keywords = _domain_keywords.get(domain, [domain.split(".")[-1]])
+
+        try:
+            results = self.memory_system.search_conversations(keywords, limit=limit)
+            # Tag each result with domain metadata for upstream consumers
+            for r in results:
+                r["_routed_domain"] = domain
+                r["_routed_namespace"] = namespace
+            return results
+        except Exception:
+            return []
     
     def route_and_retrieve(self, query_text, limit=10):
         """Analyze query; retrieve from most relevant domain."""

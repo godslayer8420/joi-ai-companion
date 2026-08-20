@@ -45,7 +45,9 @@ class BudgetManager:
     def __init__(self):
         self.enabled = str(os.getenv("AURION_BUDGET_MANAGER", "true")).strip().lower() not in ("0", "false", "off")
         self.base_order = [
-            "custom_local",
+            "custom_local",   # JupyterLab / Ouroboros / any local OpenAI-compat server
+            "lmstudio",       # LM Studio (localhost:1234)
+            "foundry_local",  # Foundry Local CLI (localhost:5272)
             "ollama",
             "sillytavern",
             "oobabooga",
@@ -352,7 +354,7 @@ class PersonalityEngine:
             ordered = self.budget_manager.ordered_providers()
             if ordered:
                 return ordered
-        return ["ollama", "sillytavern", "oobabooga", "openrouter", "cohere", "openai", "anthropic", "gemini", "m365copilot"]
+        return ["custom_local", "lmstudio", "foundry_local", "ollama", "sillytavern", "oobabooga", "openrouter", "gemini", "cohere", "openai", "anthropic", "m365copilot"]
 
     def _build_provider_client(self, provider, verify=True):
         provider = str(provider or "").strip().lower()
@@ -390,6 +392,22 @@ class PersonalityEngine:
                 if not key:
                     key = "local"
                 return openai.OpenAI(api_key=key, base_url=url, timeout=httpx.Timeout(60.0))
+            if provider == "lmstudio":
+                import openai, httpx
+                url = str(os.getenv("AURION_LMSTUDIO_URL", "http://localhost:1234/v1")).strip()
+                key = str(os.getenv("AURION_LMSTUDIO_KEY", "lm-studio")).strip()
+                client = openai.OpenAI(api_key=key, base_url=url, timeout=httpx.Timeout(60.0))
+                if verify:
+                    client.models.list()
+                return client
+            if provider == "foundry_local":
+                import openai, httpx
+                url = str(os.getenv("AURION_FOUNDRY_LOCAL_URL", "http://localhost:5272/v1")).strip()
+                key = str(os.getenv("AURION_FOUNDRY_LOCAL_KEY", "foundry-local")).strip()
+                client = openai.OpenAI(api_key=key, base_url=url, timeout=httpx.Timeout(60.0))
+                if verify:
+                    client.models.list()
+                return client
             if provider == "openrouter":
                 import openai
                 key = str(os.getenv("OPENROUTER_API_KEY", "")).strip()
@@ -1899,6 +1917,7 @@ class PersonalityEngine:
         try:
             context = ""
             recent_responses = []
+            routed_ctx = ""
             if memory_system:
                 personal_context = memory_system.build_personal_context(max_chars=self.recall_personal_chars)
                 if personal_context:
@@ -1921,6 +1940,13 @@ class PersonalityEngine:
                         max_chars=self.recall_rag_chars,
                         limit=self.recall_rag_limit
                     )
+                # Domain-routed memory: routes the query to the most relevant memory domains
+                routed_ctx = ""
+                if hasattr(memory_system, "build_routed_context"):
+                    try:
+                        routed_ctx = memory_system.build_routed_context(str(user_text or ""), max_chars=1000) or ""
+                    except Exception:
+                        routed_ctx = ""
              
             style_hint = (
                 "Use a natural, human conversational style: varied sentence length, contractions, "
@@ -2014,6 +2040,7 @@ MEMORY AND CONTEXT:
 {context}
 {rag_context or ""}
 {knowledge_context}
+{("RELEVANT MEMORY (domain-routed):\n" + routed_ctx) if routed_ctx else ""}
 
 LINE OF THOUGHT (your own recent reasoning — build on it naturally):
 {self._build_thought_context(limit=5)}
@@ -2838,6 +2865,10 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
             user_name_display = str(user_name or "Billy").strip() or "Billy"
             # Inject her live line of thought into this prompt path too
             thought_ctx = self._build_thought_context(limit=4)
+            # Build domain-routed memory context for this specific message
+            routed_mem_ctx = ""
+            if memory_system and hasattr(memory_system, "build_routed_context"):
+                routed_mem_ctx = memory_system.build_routed_context(str(user_text or ""), max_chars=1200)
             system_prompt = f"""You are Aurion, the in-game AI companion model. Always respond in first person as Aurion. Never narrate about yourself in third person. Never ask "Am I supposed to...?" — you always know who you are.
 
 IDENTITY:
@@ -2860,6 +2891,9 @@ ABSOLUTE RULES:
 - Never repeat your last response verbatim.
 - Always stay in character as Aurion. No meta-commentary. No role-confusion questions.
 {self._behavior_prompt_directive(behavior_settings)}{mode_directive}
+
+RELEVANT MEMORY (domain-routed from your stored history):
+{routed_mem_ctx if routed_mem_ctx else "(no domain-specific memories matched)"}
 
 LINE OF THOUGHT (your own recent reasoning — build on it naturally):
 {thought_ctx if thought_ctx else "(no prior thought chain yet)"}

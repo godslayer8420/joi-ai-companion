@@ -24880,16 +24880,25 @@ HTML_TEMPLATE = """
             <div class="setting-group">
                 <label class="setting-label">Provider:</label>
                 <select id="llmProviderSelect" onchange="updateLLMSetting()">
-                    <option value="">Auto-detect</option>
-                    <option value="ollama">Ollama (local)</option>
-                    <option value="sillytavern">SillyTavern (local)</option>
-                    <option value="oobabooga">Oobabooga / TextGen (local)</option>
-                    <option value="openrouter">OpenRouter</option>
-                    <option value="cohere">Cohere</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="anthropic">Anthropic</option>
-                    <option value="gemini">Google Gemini</option>
-                    <option value="m365copilot">Microsoft 365 Copilot</option>
+                    <option value="">Auto-detect (free-first)</option>
+                    <optgroup label="⚡ Free — Local">
+                        <option value="custom_local">Custom Local / JupyterLab (localhost)</option>
+                        <option value="lmstudio">LM Studio (localhost:1234) — Free</option>
+                        <option value="foundry_local">Foundry Local CLI (localhost:5272) — Free</option>
+                        <option value="ollama">Ollama (localhost:11434) — Free</option>
+                        <option value="sillytavern">SillyTavern (local)</option>
+                        <option value="oobabooga">Oobabooga / TextGen (local)</option>
+                    </optgroup>
+                    <optgroup label="🆓 Free Tier — Cloud">
+                        <option value="gemini">Google Gemini (free tier: 15 req/min)</option>
+                        <option value="openrouter">OpenRouter (free models available)</option>
+                    </optgroup>
+                    <optgroup label="💳 Paid — Cloud">
+                        <option value="cohere">Cohere</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="anthropic">Anthropic</option>
+                        <option value="m365copilot">Microsoft 365 Copilot</option>
+                    </optgroup>
                 </select>
             </div>
             <div class="setting-group">

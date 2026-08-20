@@ -2031,6 +2031,55 @@ class MemorySystem:
             return ""
         return "Retrieved context (RAG):\n" + "\n".join(lines)
 
+    def build_routed_context(self, query_text, max_chars=2400):
+        """Build domain-routed memory context slices for LLM prompt injection.
+
+        Uses MemoryRouter to determine which domain(s) are most relevant to
+        the current user message, then retrieves and formats entries from those
+        domains only — keeping the context tight and on-topic.
+
+        Falls back to empty string if routed memory is unavailable.
+        """
+        if not self.routed_memory or not self.memory_router:
+            return ""
+
+        try:
+            # Route the query to up to 2 most confident domains
+            routes = self.memory_router.route_text(query_text)
+            if not routes:
+                return ""
+
+            domain_budget = max_chars // min(len(routes[:2]), 2)
+            parts = []
+
+            for route in routes[:2]:
+                domain = f"{route['type']}.{route['domain']}"
+                entries = self.routed_memory.retrieve_from_domain(domain, limit=4)
+                if not entries:
+                    continue
+
+                lines = []
+                char_count = 0
+                label = domain.replace(".", " / ").title()
+                for entry in entries:
+                    ui = str(entry.get("user_input", "")).strip()
+                    ar = str(entry.get("aurion_response", "")).strip()
+                    if not ui and not ar:
+                        continue
+                    snippet = f"  [{ui[:80]}] → {ar[:120]}" if ar else f"  [{ui[:80]}]"
+                    if char_count + len(snippet) + 1 > domain_budget:
+                        break
+                    lines.append(snippet)
+                    char_count += len(snippet) + 1
+
+                if lines:
+                    parts.append(f"[Memory: {label}]\n" + "\n".join(lines))
+
+            return "\n".join(parts) if parts else ""
+        except Exception as e:
+            print(f"[MemorySystem] build_routed_context error: {e}")
+            return ""
+
     def build_memory_access_context(self, query="", max_chars=6000, rag_limit=16, transcript_chars=1400, include_session=True):
         blocks = []
         total = 0
