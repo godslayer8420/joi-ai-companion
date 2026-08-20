@@ -14,6 +14,10 @@ import tempfile
 
 import pytest
 
+# Add repo root to sys.path so joi_companion imports work
+_REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 _PYTEST_DATA_DIR = None
 # Repo root for a live-DATA run, which has no pytest data dir to hang it off. Created lazily

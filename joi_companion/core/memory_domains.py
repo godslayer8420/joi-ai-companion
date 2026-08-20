@@ -105,7 +105,7 @@ class RoutedMemoryStore:
             entries = self.retrieve_from_domain(domain, namespace, limit)
             results.extend([{**e, "_route_confidence": route["confidence"]} for e in entries])
         
-        return sorted(results, key=lambda r: r.get("_route_confidence", 0), reverse=True)[:limit]
+        return sorted(results, key=lambda r: r.get("_route_confidence", 0), reverse=True)[:int(limit)]
     
     def get_domain_stats(self):
         """Return domain access statistics."""

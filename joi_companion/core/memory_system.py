@@ -26,6 +26,12 @@ except ImportError:
     MemoryDomains = None
     RoutedMemoryStore = None
 
+# Import quantum cognition
+try:
+    from joi_companion.core.quantum_cognition import QuantumCognitionEngine
+except ImportError:
+    QuantumCognitionEngine = None
+
 
 class MemorySystem:
     def __init__(self, db_path='aurion_memory.json'):
@@ -2459,7 +2465,7 @@ class MemorySystem:
         self.db.close()
 
     def _initialize_routed_memory(self):
-        """Initialize routed memory domains and collective memory."""
+        """Initialize routed memory domains, collective memory, and quantum cognition."""
         try:
             if MemoryRouter and CollectiveMemory and MemoryDomains:
                 self.memory_router = MemoryRouter()
@@ -2471,11 +2477,25 @@ class MemorySystem:
                 self.collective_memory = None
                 self.routed_memory = None
                 print("[MemorySystem] Routing components not available")
+            
+            # Initialize quantum cognition engine
+            if QuantumCognitionEngine:
+                quantum_mode = os.getenv("AURION_QUANTUM_MODE", "QUANTUM_INSPIRED")
+                self.quantum_engine = QuantumCognitionEngine(
+                    memory_router=self.memory_router,
+                    memory_system=self,
+                    mode=quantum_mode
+                )
+                print(f"[MemorySystem] Quantum cognition engine initialized (mode: {quantum_mode})")
+            else:
+                self.quantum_engine = None
+                print("[MemorySystem] Quantum cognition not available")
         except Exception as e:
             print(f"[MemorySystem] Failed to initialize routed memory: {e}")
             self.memory_router = None
             self.collective_memory = None
             self.routed_memory = None
+            self.quantum_engine = None
 
     def store_routed(self, content, domain=None, namespace=None, **metadata):
         """Store content in a routed memory domain."""
@@ -2493,6 +2513,64 @@ class MemorySystem:
         """Route query and retrieve from relevant domains."""
         if self.routed_memory:
             return self.routed_memory.route_and_retrieve(query_text, limit)
+        return []
+    
+    def quantum_reason(self, query, context=None):
+        """
+        Quantum-inspired reasoning over routed memory.
+        
+        Explores superposition of memory domains and collapses to most relevant.
+        Falls back to classical if quantum layer unavailable.
+        """
+        if self.quantum_engine:
+            return self.quantum_engine.reason(query, context=context)
+        
+        # Fallback: standard routing
+        domain_routes = self.route_and_retrieve(query, limit=1)
+        if domain_routes:
+            return {
+                "selected_domain": domain_routes[0].get("domain", "personal"),
+                "reasoning_path": "classical_routing",
+                "result": domain_routes,
+                "confidence": 0.5,
+                "fallback": True
+            }
+        return {
+            "selected_domain": "personal",
+            "reasoning_path": "fallback",
+            "result": [],
+            "confidence": 0.0,
+            "fallback": True
+        }
+    
+    def quantum_superposition_query(self, query, num_samples=3):
+        """
+        Sample multiple reasoning paths from quantum superposition.
+        Returns diverse perspectives on query from all memory domains.
+        """
+        if self.quantum_engine:
+            return self.quantum_engine.superposition_query(query, num_samples=num_samples)
+        
+        # Fallback: return single result repeated
+        result = self.quantum_reason(query)
+        return [result] * num_samples
+    
+    def quantum_entangle_memories(self, mem_id1, mem_id2, query):
+        """
+        Create quantum entanglement between two memories.
+        Enables retrieval of related memories via correlation.
+        """
+        if self.quantum_engine:
+            return self.quantum_engine.entangle_memories(mem_id1, mem_id2, query)
+        return {"error": "Quantum engine not available", "fallback": True}
+    
+    def quantum_distill_to_classical(self, num_traces=5):
+        """
+        Phase 3: Convert quantum reasoning traces to classical training data.
+        Output can be used to fine-tune classical model.
+        """
+        if self.quantum_engine:
+            return self.quantum_engine.distill_to_classical(num_traces=num_traces)
         return []
 
 # ---- Virtual qubit runtime status bridge ----
