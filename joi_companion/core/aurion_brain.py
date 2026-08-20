@@ -1,4 +1,9 @@
-"""
+﻿
+# ---- Virtual qubit stability layer (local deterministic envelope) ----
+try:
+    from joi_companion.core.virtual_qubit_stability import build_virtual_qubit_stability_from_env
+except Exception:
+    build_virtual_qubit_stability_from_env = None"""
 aurion_brain.py — Aurion's personal AI brain integration layer
 
 Wires together:
@@ -634,3 +639,21 @@ def brain_status() -> Dict[str, Any]:
         "config_dim": _brain.config.dim,
         "spectral_stable": _brain.config.spectral_radius_stable(),
     }
+
+# ---- Runtime helpers for virtual qubit stability ----
+_vq_stability = build_virtual_qubit_stability_from_env() if callable(build_virtual_qubit_stability_from_env) else None
+
+def set_virtual_qubit_state(key, amplitudes):
+    if _vq_stability is None:
+        return None
+    return _vq_stability.set_state(key, amplitudes)
+
+def get_virtual_qubit_state(key):
+    if _vq_stability is None:
+        return None
+    return _vq_stability.get_state(key)
+
+def get_virtual_qubit_snapshot():
+    if _vq_stability is None:
+        return {}
+    return _vq_stability.snapshot()
