@@ -1,0 +1,79 @@
+{
+  "world_meta": {
+    "created_at": "2026-08-20T15:15:32.353404",
+    "world_name": "Aurion's Universe",
+    "current_epoch": 1,
+    "ecosystem_state": "stable"
+  },
+  "regions": {
+    "lumen_city": {
+      "region_id": "lumen_city",
+      "name": "Lumen City",
+      "ecosystem_level": 1.0,
+      "economy_state": {
+        "wealth": 100,
+        "trade_routes": []
+      },
+      "population": 15000,
+      "experiences": [
+        {
+          "timestamp": "2026-08-20T15:15:32.397054",
+          "data": {
+            "event": "Trade caravan arrived",
+            "significance": "high"
+          }
+        },
+        {
+          "timestamp": "2026-08-20T15:17:33.687833",
+          "data": {
+            "event": "Trade caravan arrived",
+            "significance": "high"
+          }
+        },
+        {
+          "timestamp": "2026-08-20T15:19:34.185718",
+          "data": {
+            "event": "Trade caravan arrived",
+            "significance": "high"
+          },
+          "event": "Trade caravan arrived",
+          "significance": "high"
+        },
+        {
+          "timestamp": "2026-08-20T15:20:23.551056",
+          "data": {
+            "event": "Trade caravan arrived",
+            "significance": "high"
+          },
+          "event": "Trade caravan arrived",
+          "significance": "high"
+        },
+        {
+          "timestamp": "2026-08-20T15:37:11.057043",
+          "data": {
+            "event": "Trade caravan arrived",
+            "significance": "high"
+          },
+          "event": "Trade caravan arrived",
+          "significance": "high"
+        }
+      ],
+      "last_updated": "2026-08-20T15:37:11.035827",
+      "mood": "prosperous",
+      "primary_trade": "textiles"
+    }
+  },
+  "festivals": {
+    "lumen_city:harvest_festival": {
+      "festival_id": "lumen_city:harvest_festival",
+      "region_id": "lumen_city",
+      "festival_name": "harvest_festival",
+      "name": "Harvest Festival",
+      "atmosphere": "joyful",
+      "affordances": [],
+      "created_at": "2026-08-20T15:19:34.171618",
+      "status": "active",
+      "days_remaining": 5
+    }
+  }
+}

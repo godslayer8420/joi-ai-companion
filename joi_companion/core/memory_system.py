@@ -1,4 +1,4 @@
-﻿from tinydb import TinyDB
+from tinydb import TinyDB
 from datetime import datetime
 import random
 import re
@@ -14,6 +14,17 @@ import ctypes
 from ctypes import wintypes
 from collections import Counter
 from pathlib import Path
+
+# Import routing components
+try:
+    from joi_companion.core.collective_memory import CollectiveMemory
+    from joi_companion.core.memory_router import MemoryRouter
+    from joi_companion.core.memory_domains import MemoryDomains, RoutedMemoryStore
+except ImportError:
+    CollectiveMemory = None
+    MemoryRouter = None
+    MemoryDomains = None
+    RoutedMemoryStore = None
 
 
 class MemorySystem:
@@ -69,6 +80,10 @@ class MemorySystem:
         self._open_db()
         self.session_id = datetime.utcnow().isoformat()
         self.session_turn = 0
+        
+        # Initialize routed memory domains and collective memory
+        self._initialize_routed_memory()
+        
         try:
             self._ensure_profile_schema()
             self._sync_memory_architecture_profile()
@@ -2442,6 +2457,44 @@ class MemorySystem:
         """Close database."""
         self._run_resilience_maintenance(force=True, reason="close")
         self.db.close()
+
+    def _initialize_routed_memory(self):
+        """Initialize routed memory domains and collective memory."""
+        try:
+            if MemoryRouter and CollectiveMemory and MemoryDomains:
+                self.memory_router = MemoryRouter()
+                self.collective_memory = CollectiveMemory()
+                self.routed_memory = RoutedMemoryStore(self, self.memory_router)
+                print("[MemorySystem] Routed memory domains initialized")
+            else:
+                self.memory_router = None
+                self.collective_memory = None
+                self.routed_memory = None
+                print("[MemorySystem] Routing components not available")
+        except Exception as e:
+            print(f"[MemorySystem] Failed to initialize routed memory: {e}")
+            self.memory_router = None
+            self.collective_memory = None
+            self.routed_memory = None
+
+    def store_routed(self, content, domain=None, namespace=None, **metadata):
+        """Store content in a routed memory domain."""
+        if self.routed_memory:
+            return self.routed_memory.store_routed(content, domain, namespace, **metadata)
+        return {"error": "Routed memory not initialized"}
+
+    def retrieve_from_domain(self, domain, namespace=None):
+        """Retrieve entries from a specific domain."""
+        if self.routed_memory:
+            return self.routed_memory.retrieve_from_domain(domain, namespace)
+        return []
+
+    def route_and_retrieve(self, query_text, limit=10):
+        """Route query and retrieve from relevant domains."""
+        if self.routed_memory:
+            return self.routed_memory.route_and_retrieve(query_text, limit)
+        return []
+
 # ---- Virtual qubit runtime status bridge ----
 def get_virtual_qubit_runtime_status() -> dict:
     """
@@ -2530,6 +2583,7 @@ def _aurion_enriched_get_memory_resilience_status(self):
 
 if _aurion_original_get_memory_resilience_status is not None:
     MemorySystem.get_memory_resilience_status = _aurion_enriched_get_memory_resilience_status
+
 
 
 
