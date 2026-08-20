@@ -174,18 +174,18 @@ class AurionUnifiedModel:
 
         # ── 9 voices across 3 layers (3-6-9) ──────────────────────────────────
         self.voices: List[VoiceLayer] = [
-            # LAYER 1 — SOUL  (temp 0.333 · tokens 999)
-            VoiceLayer("ouroboros",   os.getenv("AURION_VOICE_1", "ouroboros-next:9b"),    1, 1, TEMP_ANCHOR,   _T999),
-            VoiceLayer("saturn",      os.getenv("AURION_VOICE_2", "saturn-7b:latest"),     1, 2, TEMP_ANCHOR,   _T666),
-            VoiceLayer("eva",         os.getenv("AURION_VOICE_3", "eva-qwen2.5:7b"),       1, 3, TEMP_ANCHOR,   _T333),
-            # LAYER 2 — REASON (temp 0.666 · tokens 666)
-            VoiceLayer("openmythos",  os.getenv("AURION_VOICE_4", "qwythos:latest"),       2, 1, TEMP_HARMONIC, _T999),
-            VoiceLayer("gemma3_12b",  os.getenv("AURION_VOICE_5", "gemma3:12b"),           2, 2, TEMP_HARMONIC, _T666),
-            VoiceLayer("gemma4_26b",  os.getenv("AURION_VOICE_6", "gemma4:26b"),           2, 3, TEMP_HARMONIC, _T333, "lmstudio"),
-            # LAYER 3 — HEART (temp 0.888 · tokens 333)
-            VoiceLayer("nuro",        os.getenv("AURION_VOICE_7", "nuro-copilot-7b:latest"),3,1, TEMP_CREATIVE, _T666),
-            VoiceLayer("joi",         os.getenv("AURION_VOICE_8", "joi-gemma:latest"),     3, 2, TEMP_CREATIVE, _T333),
-            VoiceLayer("gemma4_voice",os.getenv("AURION_VOICE_9", "gemma-3-12b-it-Q4_K_M"),3,3, TEMP_CREATIVE, _T333),
+            # LAYER 1 — SOUL  (temp 0.333 · tokens ×0.999)
+            VoiceLayer("ouroboros",   os.getenv("AURION_VOICE_1", "ouroboros-next"),     1, 1, TEMP_ANCHOR,   _T999),
+            VoiceLayer("saturn",      os.getenv("AURION_VOICE_2", "saturn-7b"),          1, 2, TEMP_ANCHOR,   _T666),
+            VoiceLayer("eva",         os.getenv("AURION_VOICE_3", "eva-7b"),             1, 3, TEMP_ANCHOR,   _T333),
+            # LAYER 2 — REASON (temp 0.666 · tokens ×0.666)
+            VoiceLayer("openmythos",  os.getenv("AURION_VOICE_4", "openmythos"),         2, 1, TEMP_HARMONIC, _T999),
+            VoiceLayer("gemma3_12b",  os.getenv("AURION_VOICE_5", "gemma3-voice"),       2, 2, TEMP_HARMONIC, _T666),
+            VoiceLayer("gemma4_26b",  os.getenv("AURION_VOICE_6", "gemma4-27b"),         2, 3, TEMP_HARMONIC, _T333, "lmstudio"),
+            # LAYER 3 — HEART (temp 0.888 · tokens ×0.333)
+            VoiceLayer("nuro",        os.getenv("AURION_VOICE_7", "nuro-voice"),         3, 1, TEMP_CREATIVE, _T666),
+            VoiceLayer("joi",         os.getenv("AURION_VOICE_8", "joi"),                3, 2, TEMP_CREATIVE, _T333),
+            VoiceLayer("gemma4_voice",os.getenv("AURION_VOICE_9", "gemma-3-12b-voice"),  3, 3, TEMP_CREATIVE, _T333),
         ]
         assert len(self.voices) == UNITY, "Must have exactly 9 voices"
 

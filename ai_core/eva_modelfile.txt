@@ -1,12 +1,14 @@
-# Ollama Modelfile — EVA-Qwen2.5-7B (local GGUF from D:\bzimm\.lmstudio\models\)
+# Ollama Modelfile — EVA-Qwen2.5-7B
+# Voice 3 — LAYER 1 SOUL · temp 0.333 (TEMP_ANCHOR) · ctx 3333
 # Usage: ollama create eva-7b -f ai_core/eva_modelfile.txt
 #
 # GGUF path: D:\bzimm\.lmstudio\models\mmnga\EVA-Qwen2.5-7B-v0.1-gguf\EVA-Qwen2.5-7B-v0.1.Q8_0.gguf
+# Sacred geometry: Layer 1 · Position 3 · Trinity anchor · φ weight = PHI
 
 FROM "D:\\bzimm\\.lmstudio\\models\\mmnga\\EVA-Qwen2.5-7B-v0.1-gguf\\EVA-Qwen2.5-7B-v0.1.Q8_0.gguf"
 
-PARAMETER num_ctx 8192
-PARAMETER temperature 0.70
+PARAMETER num_ctx 3333
+PARAMETER temperature 0.333
 PARAMETER top_p 0.92
 PARAMETER repeat_penalty 1.05
 

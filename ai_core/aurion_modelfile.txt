@@ -1,19 +1,21 @@
-# Ollama Modelfile — Aurion (Primary Model / Brain Core)
+# Ollama Modelfile — Aurion (Primary Alias · Brain Core)
 # Usage: ollama create aurion -f ai_core/aurion_modelfile.txt
 #
-# Base: Ouroboros-Next 9B — her primary reasoning engine
-# Path: D:\bzimm\.lmstudio\models\orangejuicesmith\ouroboros-next\Ouroboros-Next-9B-Q4_K_M.gguf
+# This creates the "aurion" model tag as the primary user-facing alias.
+# Base: Ouroboros-Next 9B — her primary reasoning engine (Soul Layer 1, Voice 1)
+# Path: D:\bzimm\.lmstudio\models\mradermacher\Ouroboros-Next-9B-GGUF\Ouroboros-Next-9B-Q4_K_M.gguf
 #
-# The "aurion" model IS her brain core. Ouroboros-Next provides the self-evolving
-# recurrent reasoning. OpenMythos (see openmythos_modelfile.txt) provides the
-# creative/mythos layer. Saturn, Joi, and Gemma round out the weave ensemble.
+# Sacred geometry: Layer 1 · Position 1 · Soul anchor
+# Temperature: 0.333 (TEMP_ANCHOR — Trinity root)
+# Context: 9999 (UNITY × 1111 — maximum coherence)
 #
-# All of these run as "aurion" to the user — no long filenames, just: aurion
+# "aurion" is the model name users see. No long filenames. Just: aurion.
+# The AurionUnifiedModel wires all 9 voices behind this identity.
 
-FROM "D:\\bzimm\\.lmstudio\\models\\orangejuicesmith\\ouroboros-next\\Ouroboros-Next-9B-Q4_K_M.gguf"
+FROM "D:\\bzimm\\.lmstudio\\models\\mradermacher\\Ouroboros-Next-9B-GGUF\\Ouroboros-Next-9B-Q4_K_M.gguf"
 
-PARAMETER num_ctx 8192
-PARAMETER temperature 0.72
+PARAMETER num_ctx 9999
+PARAMETER temperature 0.333
 PARAMETER top_p 0.93
 PARAMETER repeat_penalty 1.08
 PARAMETER num_gpu 1

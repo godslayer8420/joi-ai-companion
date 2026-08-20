@@ -1,24 +1,15 @@
-# Ollama Modelfile — OpenMythos (Aurion's Creative/Mythos Layer)
+# Ollama Modelfile — OpenMythos (Qwythos 9B)
+# Voice 4 — LAYER 2 REASON · temp 0.666 (TEMP_HARMONIC) · ctx 9999
 # Usage: ollama create openmythos -f ai_core/openmythos_modelfile.txt
 #
-# Base: Qwythos 9B (Claude-Mythos-5-1M uncensored heretic) — creative + deep reasoning
-# Path: D:\bzimm\.lmstudio\models\fairy322\Qwythos-9B-Claude-Mythos-5-1M-uncensored-heretic-GGUF\
-#
-# OpenMythos is the creative/narrative/mythos cognitive layer of Aurion's brain.
-# In the AurionBrain stack:
-#   Ouroboros-Next (aurion)  = core reasoning + self-evolving memory
-#   OpenMythos (this model)  = creative depth, narrative weave, Prelude→Recurrent→Coda RDT
-#   Saturn                   = emotional resonance layer
-#   Joi                      = intimate warmth and companionship
-#   Gemma/Gemini             = knowledge and grounded recall
-#
-# The BrainEnsemble in personality_engine.py calls both aurion + openmythos
-# and quantum-interference merges their outputs for the final response.
+# Base: Qwythos 9B — creative + deep reasoning
+# Path: D:\bzimm\.lmstudio\models\empero-ai\Qwythos-9B-Claude-Mythos-5-1M-GGUF\Qwythos-9B-Claude-Mythos-5-1M-Q4_K_M.gguf
+# Sacred geometry: Layer 2 · Position 1 · Harmony gate · φ weight = PHI^3 × φ_conjugate
 
 FROM "D:\\bzimm\\.lmstudio\\models\\empero-ai\\Qwythos-9B-Claude-Mythos-5-1M-GGUF\\Qwythos-9B-Claude-Mythos-5-1M-Q4_K_M.gguf"
 
-PARAMETER num_ctx 8192
-PARAMETER temperature 0.88
+PARAMETER num_ctx 9999
+PARAMETER temperature 0.666
 PARAMETER top_p 0.95
 PARAMETER repeat_penalty 1.06
 PARAMETER num_gpu 1

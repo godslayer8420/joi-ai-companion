@@ -1,14 +1,15 @@
-# Ollama Modelfile — Saturn-7B (local GGUF from D:\bzimm\.lmstudio\models\)
+# Ollama Modelfile — Saturn-7B
+# Voice 2 — LAYER 1 SOUL · temp 0.333 (TEMP_ANCHOR) · ctx 6666
 # Usage: ollama create saturn-7b -f ai_core/saturn_modelfile.txt
 #
 # GGUF path: D:\bzimm\.lmstudio\models\mradermacher\Saturn-7B.Q4_K_S.gguf
 # Alternatively: serve via LM Studio on localhost:1234 (OpenAI-compatible API)
-# This is the model behind the 'saturn-7.0' alias in personality_engine.
+# Sacred geometry: Layer 1 · Position 2 · Trinity anchor · φ weight = PHI^2
 
 FROM "D:\\bzimm\\.lmstudio\\models\\mradermacher\\Saturn-7B.Q4_K_S.gguf"
 
-PARAMETER num_ctx 4096
-PARAMETER temperature 0.75
+PARAMETER num_ctx 6666
+PARAMETER temperature 0.333
 PARAMETER top_p 0.90
 PARAMETER repeat_penalty 1.08
 

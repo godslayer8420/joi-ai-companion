@@ -1,14 +1,14 @@
-# Ollama Modelfile — Nuro Copilot 7B Voice
+# Ollama Modelfile — Nuro Copilot 7B (Heart Voice)
+# Voice 7 — LAYER 3 HEART · temp 0.888 (TEMP_CREATIVE) · ctx 6666
 # Usage: ollama create nuro-voice -f ai_core/nuro_voice_modelfile.txt
 #
 # GGUF path: D:\Downloads\Ai\nuro-copilot-7b-GGUF\nuro-copilot-7b.Q4_K_S.gguf
-# This model is optimized for voice interaction and conversational responses.
-# Behind the 'nuro-voice' and 'aurion-voice' aliases in personality_engine.
+# Sacred geometry: Layer 3 · Position 1 · Unity gate · φ weight = PHI^3 × φ_conjugate^2
 
 FROM "D:\\Downloads\\Ai\\nuro-copilot-7b-GGUF\\nuro-copilot-7b.Q4_K_S.gguf"
 
-PARAMETER num_ctx 4096
-PARAMETER temperature 0.7
+PARAMETER num_ctx 6666
+PARAMETER temperature 0.888
 PARAMETER top_p 0.85
 PARAMETER repeat_penalty 1.1
 

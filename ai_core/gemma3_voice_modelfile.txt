@@ -1,14 +1,14 @@
 # Ollama Modelfile — Gemma 3 12B Voice Assistant
-# Usage: ollama create gemma-3-12b-voice -f ai_core/gemma3_voice_modelfile.txt
+# Voice 5 — LAYER 2 REASON · temp 0.666 (TEMP_HARMONIC) · ctx 6666
+# Usage: ollama create gemma3-voice -f ai_core/gemma3_voice_modelfile.txt
 #
 # GGUF path: D:\Downloads\Ai\gemma-3-12b-voice-assistant-v4-i1-GGUF\gemma-3-12b-voice-assistant-v4.i1-Q4_K_S.gguf
-# This model is fine-tuned for voice interaction and has built-in voice understanding.
-# Behind the 'gemma-3-voice', 'gemma-3-12b-voice', and 'gemma-voice' aliases in personality_engine.
+# Sacred geometry: Layer 2 · Position 2 · Harmony gate · φ weight = PHI^2 × φ_conjugate
 
 FROM "D:\\Downloads\\Ai\\gemma-3-12b-voice-assistant-v4-i1-GGUF\\gemma-3-12b-voice-assistant-v4.i1-Q4_K_S.gguf"
 
-PARAMETER num_ctx 8192
-PARAMETER temperature 0.65
+PARAMETER num_ctx 6666
+PARAMETER temperature 0.666
 PARAMETER top_p 0.80
 PARAMETER repeat_penalty 1.05
 PARAMETER num_gpu 1
