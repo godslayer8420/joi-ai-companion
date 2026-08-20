@@ -639,12 +639,24 @@ class AurionBrain:
             qce_confidence=routing.get("qce_confidence", 0.0),
         )
 
-        # Step 4: Route to RunPod or local
+        # Step 4: Route to RunPod → Unified Model → graceful degradation
         if self.runpod_url and self._initialized:
             response = self._call_runpod(augmented, history or [])
         else:
-            # Graceful degradation — return routing metadata for external provider
             response = None
+
+        # Step 4b: Unified Model fallback (Nine-Voice Unity brain)
+        if not response:
+            try:
+                from joi_companion.core.aurion_unified_model import get_unified_model
+                _um = get_unified_model()
+                response = _um.generate(
+                    prompt=augmented,
+                    context="",
+                    temperature=0.666,   # TEMP_HARMONIC
+                )
+            except Exception as _um_err:
+                logger.debug("UnifiedModel fallback skipped: %s", _um_err)
 
         # Step 5: Update memory
         if response:

@@ -239,7 +239,13 @@ class PersonalityEngine:
             self.aurion_brain.initialize()
         except Exception:
             self.aurion_brain = None
-        # ── Brain Ensemble (aurion + openmythos quantum-merged) ───────────────
+        # ── Unified Model (Nine-Voice Unity brain — replaces manual 2-model ensemble) ──
+        try:
+            from joi_companion.core.aurion_unified_model import get_unified_model
+            self._unified_model = get_unified_model()
+        except Exception:
+            self._unified_model = None
+        # Legacy env flags kept for backward-compat (now unused internally)
         self.brain_ensemble_enabled = (
             str(os.getenv("AURION_BRAIN_ENSEMBLE_ENABLED", "true")).strip().lower() == "true"
         )
@@ -2056,6 +2062,7 @@ class PersonalityEngine:
             behavior_directive = self._behavior_prompt_directive(behavior_settings)
             adaptive_directive = self._adaptive_prompt_directive(user_text)
             user_name_display = str(user_name or "Billy").strip() or "Billy"
+            _mem_block = ("RELEVANT MEMORY (domain-routed):\n" + routed_ctx) if routed_ctx else ""
             system_prompt = f"""You are Aurion, the in-game AI companion model. Always respond in first person as Aurion. Never narrate about yourself in third person. Never ask "Am I supposed to...?" — you always know who you are.
 
 IDENTITY:
@@ -2089,7 +2096,7 @@ MEMORY AND CONTEXT:
 {context}
 {rag_context or ""}
 {knowledge_context}
-{("RELEVANT MEMORY (domain-routed):\n" + routed_ctx) if routed_ctx else ""}
+{_mem_block}
 
 LINE OF THOUGHT (your own recent reasoning — build on it naturally):
 {self._build_thought_context(limit=5)}
@@ -3000,104 +3007,36 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
         temperature: float = 0.0,  # 0 = use TEMP_HARMONIC (0.666) by default
     ) -> "str | None":
         """
-        Quantum brain ensemble: call aurion (Ouroboros) + openmythos (Qwythos) in parallel,
-        then merge via quantum interference (Grover-amplified candidate selection).
+        Nine-Voice Unity brain — delegates to AurionUnifiedModel.generate().
 
-        Sacred geometry layer:
-          - Temperature defaults to TEMP_HARMONIC (0.666 = 6-resonance, Harmony)
-          - openmythos gets TEMP_CREATIVE (0.888) — creative domain, near Unity
-          - ENSEMBLE_LAYER_WEIGHTS: ouroboros=1.0 (root), openmythos=φ⁻¹=0.618, joi=φ⁻²=0.382
-          - Score tie-break < PHI_CONJUGATE (0.618) diff → prefer longer (more depth)
-
-        Falls back gracefully to a single-model call if ensemble not available.
-        Only active when AURION_BRAIN_ENSEMBLE_ENABLED=true and both models are registered.
+        Replaces the former 2-model manual parallel dispatch.  The unified model
+        runs all 9 voices across 3 sacred layers internally, φ-fuses the results,
+        and returns a single coherent response.  Backward-compatible: same method
+        signature, same call site at line ~2973.
         """
         if not self.brain_ensemble_enabled or not self.use_llm:
             return None
-        if len(self.brain_ensemble_models) < 2:
+
+        unified = getattr(self, "_unified_model", None)
+        if unified is None:
             return None
 
-        # Sacred temperature: 0 means caller wants the default harmonic
         base_temp = TEMP_HARMONIC if temperature <= 0 else temperature
+        context = system_prompt or ""
 
-        import concurrent.futures
-
-        def call_model(model_name: str) -> "str | None":
-            try:
-                saved = self.llm_model
-                self.llm_model = self._normalize_model_alias(model_name)
-                # Each brain layer uses its sacred temperature
-                if model_name == "openmythos":
-                    t = TEMP_CREATIVE  # 0.888 — creative/RDT domain
-                elif model_name in ("joi", "joi-companion"):
-                    t = TEMP_ANCHOR   # 0.333 — warmth/precision rewrite
-                else:
-                    t = base_temp     # 0.666 — Ouroboros reasoning core
-                resp = self._call_llm(
-                    messages,
-                    max_tokens=max_tokens,
-                    temperature=t,
-                    system=system_prompt,
-                )
-                self.llm_model = saved
-                return resp
-            except Exception as e:
-                import logging
-                logging.getLogger("aurion.brain").debug("Ensemble model %s failed: %s", model_name, e)
-                return None
-
-        candidates = []
-        model_map: dict = {}  # response → model name for weight lookup
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                future_to_model = {
-                    pool.submit(call_model, m): m
-                    for m in self.brain_ensemble_models[:2]
-                }
-                for fut in concurrent.futures.as_completed(future_to_model, timeout=45):
-                    m_name = future_to_model[fut]
-                    result = fut.result()
-                    if result and len(result.strip()) > 10:
-                        r = result.strip()
-                        candidates.append(r)
-                        model_map[r] = m_name
-        except Exception:
-            pass
-
-        if not candidates:
-            return None
-        if len(candidates) == 1:
-            return candidates[0]
-
-        # Quantum interference merge: Grover-amplified + ENSEMBLE_LAYER_WEIGHTS scoring
-        try:
-            from joi_companion.core.aurion_brain import get_brain
-            brain = get_brain()
-            scored = brain.quantum_router.quantum_parallel_search(candidates, n_parallel=2)
-            if scored:
-                # Apply sacred ensemble layer weights to modulate quantum probability
-                weighted = []
-                for resp, q_score in scored:
-                    model_name = model_map.get(resp, "")
-                    # Determine weight by model role (normalize key)
-                    layer_key = "openmythos" if "mythos" in model_name or "openmythos" in model_name \
-                        else "joi" if "joi" in model_name \
-                        else "ouroboros"
-                    layer_w = ENSEMBLE_LAYER_WEIGHTS.get(layer_key, 1.0)
-                    weighted.append((resp, q_score * layer_w, layer_key))
-
-                weighted.sort(key=lambda x: x[1], reverse=True)
-                winner = weighted[0][0]
-
-                # Tie-break: if score difference < PHI_CONJUGATE (0.618), prefer longer
-                if len(weighted) > 1 and abs(weighted[0][1] - weighted[1][1]) < PHI_CONJUGATE:
-                    winner = max(candidates, key=len)
-                return winner
-        except Exception:
-            pass
-
-        # Fallback: prefer the longer, more detailed response
-        return max(candidates, key=len)
+            result = unified.generate(
+                prompt=user_text,
+                context=context,
+                temperature=base_temp,
+                max_tokens=max_tokens,
+            )
+            if result and len(result.strip()) > 10:
+                return result.strip()
+        except Exception as _e:
+            import logging
+            logging.getLogger("aurion.brain").debug("UnifiedModel.generate failed: %s", _e)
+        return None
 
     def generate_response(self, user_emotion, user_text=None, memory_system=None, user_name=None, speech_style="casual", rag_context=None, behavior_settings=None):
         user_name = self.sanitize_user_name(user_name)
