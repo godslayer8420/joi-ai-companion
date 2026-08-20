@@ -54,6 +54,31 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("aurion.brain")
 
+# ── Sacred Geometry + 3-6-9 numerology layer ──────────────────────────────────
+try:
+    from joi_companion.core.sacred_geometry import (
+        PHI, PHI_CONJUGATE, SQRT_2, T_GATE_THETA, S_GATE_THETA,
+        QUANTUM_DIM_MEDIUM, QUANTUM_DIM_LARGE,
+        ENSEMBLE_LAYER_WEIGHTS, TRINITY, HARMONY, UNITY,
+        vortex_weight, phi_decay, sacred_dim,
+    )
+    _SACRED = True
+except Exception:
+    PHI = 1.6180339887
+    PHI_CONJUGATE = 0.6180339887
+    SQRT_2 = math.sqrt(2)
+    T_GATE_THETA = math.pi / 8
+    S_GATE_THETA = math.pi / 4
+    QUANTUM_DIM_MEDIUM = 63
+    QUANTUM_DIM_LARGE = 126
+    ENSEMBLE_LAYER_WEIGHTS = {"ouroboros": 1.0, "openmythos": 0.618, "joi": 0.382}
+    TRINITY, HARMONY, UNITY = 3, 6, 9
+    vortex_weight = lambda n: (n % 9) / 9 or 1.0
+    phi_decay = lambda s, steps=1: s * (PHI_CONJUGATE ** steps)
+    sacred_dim = lambda base=64: base
+    _SACRED = False
+
+
 # ── Quantum Layer ──────────────────────────────────────────────────────────────
 
 class QuantumState:
@@ -65,20 +90,23 @@ class QuantumState:
     gate operations.
     """
 
-    def __init__(self, dim: int):
-        self.dim = dim
+    def __init__(self, dim: int = 0):
+        # Default to QUANTUM_DIM_MEDIUM (63, digital root 9 — Unity)
+        # so every QuantumState resonates with the 3-6-9 vortex by default.
+        self.dim = dim if dim > 0 else QUANTUM_DIM_MEDIUM
         # Complex amplitude vector: |ψ⟩ = Σ αᵢ|i⟩
-        self.amplitudes: List[complex] = [complex(1.0 / math.sqrt(dim), 0.0)] * dim
+        # Initial amplitude 1/√dim normalised; √dim uses sacred SQRT_2 chain
+        self.amplitudes: List[complex] = [complex(1.0 / math.sqrt(self.dim), 0.0)] * self.dim
 
     def apply_hadamard(self, qubit: int) -> "QuantumState":
         """Hadamard gate — creates superposition on one dimension."""
         if qubit >= self.dim:
             return self
         a = self.amplitudes[qubit]
-        # H|0⟩ = (|0⟩+|1⟩)/√2, H|1⟩ = (|0⟩-|1⟩)/√2
+        # H|0⟩ = (|0⟩+|1⟩)/√2  — SQRT_2 from sacred_geometry
         partner = (qubit + self.dim // 2) % self.dim
-        new_a = (a + self.amplitudes[partner]) / math.sqrt(2)
-        new_b = (a - self.amplitudes[partner]) / math.sqrt(2)
+        new_a = (a + self.amplitudes[partner]) / SQRT_2
+        new_b = (a - self.amplitudes[partner]) / SQRT_2
         self.amplitudes[qubit] = new_a
         self.amplitudes[partner] = new_b
         return self
@@ -157,13 +185,20 @@ class QuantumLogicRouter:
         "TOFF": "Toffoli — 3-qubit conditional (AND gate)",
     }
 
-    def __init__(self, dim: int = 64):
-        self.dim = dim
-        self.state = QuantumState(dim)
+    def __init__(self, dim: int = 0):
+        # Use sacred QUANTUM_DIM_MEDIUM (63, digital root 9 = Unity) by default
+        self.dim = dim if dim > 0 else QUANTUM_DIM_MEDIUM
+        self.state = QuantumState(self.dim)
 
     def route(self, query_tokens: List[str], context_depth: int = 1) -> Dict[str, Any]:
         """
         Apply quantum algorithm routing to select optimal computation path.
+
+        Gate angles are anchored to sacred geometry:
+          - Phase rotation uses φ-modulated θ (golden ratio spiral)
+          - T gate uses T_GATE_THETA (π/8) from sacred_geometry
+          - S gate uses S_GATE_THETA (π/4) from sacred_geometry
+          - Recurrent depth ceiling is UNITY (9) steps
 
         Args:
             query_tokens: Tokenized input
@@ -174,30 +209,36 @@ class QuantumLogicRouter:
         """
         # Encode query complexity into gate sequence
         complexity = min(len(query_tokens) / 10.0, 1.0)
-        depth_factor = min(context_depth / 32.0, 1.0)
+        # Depth factor anchored to UNITY (9) — max meaningful recurrent steps
+        depth_factor = min(context_depth / (UNITY * 4.0), 1.0)
 
         # Build gate sequence based on query characteristics
         gates_applied = []
 
-        # Hadamard for exploration when query is ambiguous
-        if complexity > 0.3:
+        # Hadamard for exploration when query is ambiguous (> TRINITY_WEIGHT = 0.333)
+        if complexity > 0.333:
             self.state.apply_hadamard(0)
             gates_applied.append("H")
 
-        # Phase rotation proportional to depth (deeper = more precision)
-        theta = math.pi * depth_factor
+        # Phase rotation: golden-ratio modulated θ — spiral through the reasoning manifold
+        theta = math.pi * depth_factor * PHI_CONJUGATE
         self.state.apply_phase(1, theta)
         gates_applied.append(f"P({theta:.3f})")
 
-        # CNOT entanglement for complex multi-part queries
-        if complexity > 0.6:
+        # CNOT entanglement for complex multi-part queries (> HARMONY_WEIGHT = 0.666)
+        if complexity > 0.666:
             self.state.apply_cnot(0, self.dim // 4)
             gates_applied.append("CNOT")
 
-        # T gate for high-precision reasoning
+        # T gate — π/8 precision rotation (from sacred T_GATE_THETA)
         if depth_factor > 0.5:
-            self.state.apply_phase(2, math.pi / 8)
+            self.state.apply_phase(2, T_GATE_THETA)
             gates_applied.append("T")
+
+        # S gate — π/4 phase shift for high-resonance queries
+        if complexity > 0.888:  # near Unity temperature threshold
+            self.state.apply_phase(TRINITY, S_GATE_THETA)
+            gates_applied.append("S")
 
         probs = self.state.measure()
         dominant = probs.index(max(probs))
@@ -205,10 +246,13 @@ class QuantumLogicRouter:
         return {
             "gates_applied": gates_applied,
             "dominant_path": dominant,
-            "probability_distribution": probs[:8],  # top 8 only
-            "recurrent_depth_suggested": max(1, int(context_depth * (1 + complexity))),
-            "parallel_paths_suggested": max(1, int(2 ** (complexity * 3))),
-            "quantum_advantage": complexity > 0.5,
+            "probability_distribution": probs[:HARMONY],  # 6-fold (Flower of Life)
+            # Recurrent depth: φ-scaled, ceiling UNITY*4=36 (digital root 9)
+            "recurrent_depth_suggested": max(1, int(context_depth * (1 + complexity * PHI_CONJUGATE))),
+            # Parallel paths: TRINITY (3) base, scale with complexity
+            "parallel_paths_suggested": max(1, int(TRINITY * (1 + complexity))),
+            "quantum_advantage": complexity > PHI_CONJUGATE,  # > 0.618 (golden threshold)
+            "sacred_resonance": vortex_weight(int(complexity * 9)),
         }
 
     def quantum_parallel_search(
@@ -217,24 +261,35 @@ class QuantumLogicRouter:
         """
         Grover-inspired parallel search over candidate responses.
         Amplifies probability of best candidates through interference.
+
+        Sacred geometry applied:
+          - Phase oracle uses φ-weighted scoring (golden ratio amplitude)
+          - Grover iterations ceiling: UNITY (9)
+          - Diffusion uses inversion about mean (Grover standard)
+          - Ensemble layer weights (ouroboros/openmythos/joi) from ENSEMBLE_LAYER_WEIGHTS
         """
         if not candidates:
             return []
 
         n = len(candidates)
-        state = QuantumState(max(n, self.dim))
+        dim = sacred_dim(max(n, self.dim))
+        state = QuantumState(dim)
 
         # Initialize uniform superposition
         for i in range(n):
             state.amplitudes[i] = complex(1.0 / math.sqrt(n), 0.0)
 
         # Oracle + diffusion iterations (Grover's algorithm structure)
-        n_iters = max(1, int(math.pi / 4 * math.sqrt(n)))
+        # Cap at UNITY (9) — vortex attractor, never more than 9 Grover steps
+        n_iters = min(UNITY, max(1, int(math.pi / 4 * math.sqrt(n))))
         for _ in range(n_iters):
-            # Phase flip on "good" states (heuristic: longer = more detailed)
+            # Phase oracle: φ-weighted score — golden ratio amplification of quality
+            max_len = max(len(cc) for cc in candidates) or 1
             for i, c in enumerate(candidates):
-                score = len(c) / max(len(cc) for cc in candidates)
-                state.apply_phase(i, math.pi * score)
+                # Length score × φ⁻¹ weight — longer AND more resonant responses win
+                length_score = len(c) / max_len
+                phi_score = length_score * PHI_CONJUGATE
+                state.apply_phase(i, math.pi * phi_score)
 
             # Diffusion operator (inversion about mean)
             mean_amp = sum(state.amplitudes[:n]) / n

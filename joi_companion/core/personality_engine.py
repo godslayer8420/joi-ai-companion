@@ -27,6 +27,7 @@ def enforce_free_first_provider(selected_provider: str) -> str:
         return provider
     # hard fail-closed for paid unless explicit, time-bounded authorization is present
     return provider if _paid_unlock_window_ok() else "ollama"
+
 import random
 import spacy
 import os
@@ -38,6 +39,33 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# ── Sacred Geometry constants ──────────────────────────────────────────────────
+try:
+    from joi_companion.core.sacred_geometry import (
+        PHI, PHI_CONJUGATE,
+        TEMP_ANCHOR, TEMP_HARMONIC, TEMP_CREATIVE, TEMP_PEAK,
+        ENSEMBLE_LAYER_WEIGHTS, TRINITY, HARMONY, UNITY,
+        vortex_weight, phi_decay, trinity_budget,
+    )
+    _SACRED_PE = True
+except Exception:
+    PHI = 1.6180339887
+    PHI_CONJUGATE = 0.6180339887
+    TEMP_ANCHOR = 0.333
+    TEMP_HARMONIC = 0.666
+    TEMP_CREATIVE = 0.888
+    TEMP_PEAK = 1.0
+    ENSEMBLE_LAYER_WEIGHTS = {"ouroboros": 1.0, "openmythos": 0.618, "joi": 0.382}
+    TRINITY, HARMONY, UNITY = 3, 6, 9
+    vortex_weight = lambda n: (n % 9) / 9 or 1.0
+    phi_decay = lambda s, steps=1: s * (PHI_CONJUGATE ** steps)
+    trinity_budget = lambda total: {
+        "personal": int(total * PHI_CONJUGATE),
+        "knowledge": int(total * PHI_CONJUGATE ** 2),
+        "collective": max(0, total - int(total * PHI_CONJUGATE) - int(total * PHI_CONJUGATE ** 2)),
+    }
+    _SACRED_PE = False
 
 class BudgetManager:
     """Cost-aware orchestration that prefers local/free model capacity before paid providers."""
@@ -2936,7 +2964,7 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
             if self.cot_enabled:
                 cot_result = self._generate_cot_response(
                     user_text, system_prompt, context="",
-                    max_tokens=300, temperature=0.72,
+                    max_tokens=300, temperature=TEMP_HARMONIC,
                     memory_system=memory_system
                 )
                 if cot_result:
@@ -2948,7 +2976,7 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
                 system_prompt=system_prompt,
                 messages=messages,
                 max_tokens=250,
-                temperature=0.72,
+                temperature=0,  # 0 → _generate_brain_ensemble_response uses TEMP_HARMONIC
             )
             if ensemble_result:
                 return ensemble_result
@@ -2956,7 +2984,7 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
             return self._call_llm(
                 messages,
                 max_tokens=250,
-                temperature=0.72,
+                temperature=TEMP_HARMONIC,
                 system=system_prompt
             )
         except Exception as e:
@@ -2969,11 +2997,17 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
         system_prompt: str,
         messages: list,
         max_tokens: int = 280,
-        temperature: float = 0.72,
+        temperature: float = 0.0,  # 0 = use TEMP_HARMONIC (0.666) by default
     ) -> "str | None":
         """
         Quantum brain ensemble: call aurion (Ouroboros) + openmythos (Qwythos) in parallel,
         then merge via quantum interference (Grover-amplified candidate selection).
+
+        Sacred geometry layer:
+          - Temperature defaults to TEMP_HARMONIC (0.666 = 6-resonance, Harmony)
+          - openmythos gets TEMP_CREATIVE (0.888) — creative domain, near Unity
+          - ENSEMBLE_LAYER_WEIGHTS: ouroboros=1.0 (root), openmythos=φ⁻¹=0.618, joi=φ⁻²=0.382
+          - Score tie-break < PHI_CONJUGATE (0.618) diff → prefer longer (more depth)
 
         Falls back gracefully to a single-model call if ensemble not available.
         Only active when AURION_BRAIN_ENSEMBLE_ENABLED=true and both models are registered.
@@ -2983,16 +3017,26 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
         if len(self.brain_ensemble_models) < 2:
             return None
 
+        # Sacred temperature: 0 means caller wants the default harmonic
+        base_temp = TEMP_HARMONIC if temperature <= 0 else temperature
+
         import concurrent.futures
 
         def call_model(model_name: str) -> "str | None":
             try:
                 saved = self.llm_model
                 self.llm_model = self._normalize_model_alias(model_name)
+                # Each brain layer uses its sacred temperature
+                if model_name == "openmythos":
+                    t = TEMP_CREATIVE  # 0.888 — creative/RDT domain
+                elif model_name in ("joi", "joi-companion"):
+                    t = TEMP_ANCHOR   # 0.333 — warmth/precision rewrite
+                else:
+                    t = base_temp     # 0.666 — Ouroboros reasoning core
                 resp = self._call_llm(
                     messages,
                     max_tokens=max_tokens,
-                    temperature=temperature + (0.10 if model_name == "openmythos" else 0.0),
+                    temperature=t,
                     system=system_prompt,
                 )
                 self.llm_model = saved
@@ -3003,13 +3047,20 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
                 return None
 
         candidates = []
+        model_map: dict = {}  # response → model name for weight lookup
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                futures = {pool.submit(call_model, m): m for m in self.brain_ensemble_models[:2]}
-                for fut in concurrent.futures.as_completed(futures, timeout=45):
+                future_to_model = {
+                    pool.submit(call_model, m): m
+                    for m in self.brain_ensemble_models[:2]
+                }
+                for fut in concurrent.futures.as_completed(future_to_model, timeout=45):
+                    m_name = future_to_model[fut]
                     result = fut.result()
                     if result and len(result.strip()) > 10:
-                        candidates.append(result.strip())
+                        r = result.strip()
+                        candidates.append(r)
+                        model_map[r] = m_name
         except Exception:
             pass
 
@@ -3018,15 +3069,28 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
         if len(candidates) == 1:
             return candidates[0]
 
-        # Quantum interference merge: use Grover-amplified selection from aurion_brain
+        # Quantum interference merge: Grover-amplified + ENSEMBLE_LAYER_WEIGHTS scoring
         try:
             from joi_companion.core.aurion_brain import get_brain
             brain = get_brain()
             scored = brain.quantum_router.quantum_parallel_search(candidates, n_parallel=2)
             if scored:
-                winner, score = scored[0]
-                # If both scores close (< 0.05 difference), prefer longer (more depth)
-                if len(scored) > 1 and abs(scored[0][1] - scored[1][1]) < 0.05:
+                # Apply sacred ensemble layer weights to modulate quantum probability
+                weighted = []
+                for resp, q_score in scored:
+                    model_name = model_map.get(resp, "")
+                    # Determine weight by model role (normalize key)
+                    layer_key = "openmythos" if "mythos" in model_name or "openmythos" in model_name \
+                        else "joi" if "joi" in model_name \
+                        else "ouroboros"
+                    layer_w = ENSEMBLE_LAYER_WEIGHTS.get(layer_key, 1.0)
+                    weighted.append((resp, q_score * layer_w, layer_key))
+
+                weighted.sort(key=lambda x: x[1], reverse=True)
+                winner = weighted[0][0]
+
+                # Tie-break: if score difference < PHI_CONJUGATE (0.618), prefer longer
+                if len(weighted) > 1 and abs(weighted[0][1] - weighted[1][1]) < PHI_CONJUGATE:
                     winner = max(candidates, key=len)
                 return winner
         except Exception:

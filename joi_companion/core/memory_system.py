@@ -15,6 +15,32 @@ from ctypes import wintypes
 from collections import Counter
 from pathlib import Path
 
+# ── Sacred Geometry constants ──────────────────────────────────────────────────
+try:
+    from joi_companion.core.sacred_geometry import (
+        PHI, PHI_CONJUGATE,
+        TEMP_HARMONIC, ENSEMBLE_LAYER_WEIGHTS,
+        FLOWER_PRIMARY_ROUTES, FLOWER_MAX_CANDIDATES,
+        TRINITY, HARMONY, UNITY,
+        trinity_budget, phi_decay,
+    )
+    _SACRED_MEM = True
+except Exception:
+    PHI = 1.6180339887
+    PHI_CONJUGATE = 0.6180339887
+    TEMP_HARMONIC = 0.666
+    ENSEMBLE_LAYER_WEIGHTS = {"ouroboros": 1.0, "openmythos": 0.618, "joi": 0.382}
+    FLOWER_PRIMARY_ROUTES = 7
+    FLOWER_MAX_CANDIDATES = 19
+    TRINITY, HARMONY, UNITY = 3, 6, 9
+    trinity_budget = lambda total: {
+        "personal": int(total * PHI_CONJUGATE),
+        "knowledge": int(total * PHI_CONJUGATE ** 2),
+        "collective": max(0, total - int(total * PHI_CONJUGATE) - int(total * PHI_CONJUGATE ** 2)),
+    }
+    phi_decay = lambda s, steps=1: s * (PHI_CONJUGATE ** steps)
+    _SACRED_MEM = False
+
 # Import routing components
 try:
     from joi_companion.core.collective_memory import CollectiveMemory
@@ -672,6 +698,10 @@ class MemorySystem:
         self.user_profile = self.db.table('user_profile')
         self.topics = self.db.table('topics')
         self.rag_documents = self.db.table('rag_documents')
+        # Namespaced skill/knowledge store — isolated from RAG so domains grow independently
+        self.skill_namespaces = self.db.table('skill_namespaces')
+        # Durable image/media reference store — metadata only, no raw blobs
+        self.image_references = self.db.table('image_references')
         self._interaction_read_repair_attempted = False
 
     def _repair_corrupted_db_if_needed(self):
@@ -1926,6 +1956,173 @@ class MemorySystem:
                 ids.append(doc_id)
         return ids
 
+    # ── Skill Knowledge Namespaces ─────────────────────────────────────────────
+
+    def add_skill_knowledge(
+        self,
+        text: str,
+        namespace: str = "general",
+        source: str = "manual",
+        metadata: dict = None,
+    ) -> "str | None":
+        """
+        Store a skill/knowledge chunk in the namespaced skill table.
+
+        Namespace examples: 'text_to_image', 'voice_synthesis', 'unreal_engine',
+        'code_generation', 'sacred_geometry', etc.
+
+        Chunks are stored alongside a φ-decay relevance score so older entries
+        naturally fade unless refreshed.
+        """
+        if not text or not text.strip():
+            return None
+        chunk = text.strip()[:2000]
+        with self._db_lock:
+            import uuid
+            doc_id = str(uuid.uuid4())[:12]
+            now = datetime.utcnow().isoformat()
+            self.skill_namespaces.insert({
+                "id": doc_id,
+                "namespace": str(namespace or "general").lower().replace(" ", "_"),
+                "content": chunk,
+                "source": str(source or "manual"),
+                "metadata": metadata or {},
+                "timestamp": now,
+                # φ-decay relevance — starts at 1.0, consumers can age it down
+                "relevance": 1.0,
+                # Vortex resonance tag: digital root of text length, anchored to 3-6-9
+                "vortex_tag": (len(chunk) % 9) or 9,
+            })
+            return doc_id
+
+    def get_skill_context(
+        self,
+        query: str,
+        namespace: str = None,
+        limit: int = 0,
+    ) -> list:
+        """
+        Retrieve skill knowledge entries matching query.
+
+        limit defaults to HARMONY (6) — Flower of Life symmetry.
+        Scores by token overlap × φ-decayed relevance.
+        """
+        if limit <= 0:
+            limit = HARMONY  # 6, hexagonal symmetry
+        with self._db_lock:
+            query_tokens = self._tokenize_for_rag(query)
+            if not query_tokens:
+                return []
+            docs = self.skill_namespaces.all()
+            if namespace:
+                ns = namespace.lower().replace(" ", "_")
+                docs = [d for d in docs if d.get("namespace") == ns]
+            candidates = []
+            for doc in docs:
+                content = self._sanitize_memory_content(doc.get("content", ""))
+                if not content:
+                    continue
+                overlap = self._score_overlap(query_tokens, self._tokenize_for_rag(content))
+                if overlap <= 0.01:
+                    continue
+                # φ-decay modulates raw overlap — aged entries score lower
+                relevance = float(doc.get("relevance", 1.0))
+                final_score = overlap * relevance
+                candidates.append({
+                    "namespace": doc.get("namespace", "general"),
+                    "content": content,
+                    "source": doc.get("source", "skill"),
+                    "score": final_score,
+                    "timestamp": doc.get("timestamp", ""),
+                })
+            candidates.sort(key=lambda x: x["score"], reverse=True)
+            return candidates[:limit]
+
+    def build_skill_context(self, query: str, namespace: str = None, max_chars: int = 0) -> str:
+        """
+        Format retrieved skill context for prompt injection.
+        max_chars defaults to the 'knowledge' slice of trinity_budget.
+        """
+        if max_chars <= 0:
+            # Use knowledge slice of a 4096-char budget
+            budget = trinity_budget(4096)
+            max_chars = budget["knowledge"]
+        results = self.get_skill_context(query, namespace=namespace)
+        lines = []
+        used = 0
+        for r in results:
+            line = f"[{r['namespace']}] {r['content']}"
+            if used + len(line) > max_chars:
+                break
+            lines.append(line)
+            used += len(line)
+        return "\n".join(lines) if lines else ""
+
+    # ── Image Folder References ────────────────────────────────────────────────
+
+    def add_image_reference(
+        self,
+        path: str,
+        caption: str = "",
+        context_tags: list = None,
+        linked_memory_ids: list = None,
+    ) -> "str | None":
+        """
+        Store image metadata reference (no raw blobs — path + caption + tags only).
+
+        Integrates with visual intent routing: when memory router detects a
+        'visual' intent, build_routed_context() will include relevant image refs.
+        """
+        if not path:
+            return None
+        with self._db_lock:
+            import uuid
+            doc_id = str(uuid.uuid4())[:12]
+            now = datetime.utcnow().isoformat()
+            self.image_references.insert({
+                "id": doc_id,
+                "path": str(path),
+                "caption": str(caption or ""),
+                "context_tags": list(context_tags or []),
+                "linked_memory_ids": list(linked_memory_ids or []),
+                "timestamp": now,
+                "relevance": 1.0,
+            })
+            return doc_id
+
+    def get_image_context(self, query: str, limit: int = 0) -> list:
+        """
+        Retrieve image references relevant to query.
+        limit defaults to TRINITY (3) — trinity of visual memory.
+        Scores by caption + tag token overlap.
+        """
+        if limit <= 0:
+            limit = TRINITY  # 3, trinity
+        with self._db_lock:
+            query_tokens = self._tokenize_for_rag(query)
+            if not query_tokens:
+                return []
+            docs = self.image_references.all()
+            candidates = []
+            for doc in docs:
+                caption = self._sanitize_memory_content(doc.get("caption", ""))
+                tags = " ".join(doc.get("context_tags", []))
+                combined = (caption + " " + tags).strip()
+                if not combined:
+                    continue
+                score = self._score_overlap(query_tokens, self._tokenize_for_rag(combined))
+                if score <= 0.01:
+                    continue
+                candidates.append({
+                    "path": doc.get("path", ""),
+                    "caption": caption,
+                    "tags": doc.get("context_tags", []),
+                    "score": score * float(doc.get("relevance", 1.0)),
+                    "timestamp": doc.get("timestamp", ""),
+                })
+            candidates.sort(key=lambda x: x["score"], reverse=True)
+            return candidates[:limit]
+
     def retrieve_relevant_memories(self, query, limit=8):
         with self._db_lock:
             query_tokens = self._tokenize_for_rag(query)
@@ -2038,23 +2235,37 @@ class MemorySystem:
         the current user message, then retrieves and formats entries from those
         domains only — keeping the context tight and on-topic.
 
+        Sacred geometry applied:
+          - trinity_budget() splits max_chars using golden ratio φ:
+              personal  = φ⁻¹ × total  (≈ 61.8% — most relevant)
+              knowledge = φ⁻² × total  (≈ 38.2%)
+              collective = remainder    (buffer, boundary context)
+          - Route limit: FLOWER_PRIMARY_ROUTES (7) maximum domains checked
+          - Entry limit per domain: TRINITY (3) entries minimum
+
         Falls back to empty string if routed memory is unavailable.
         """
         if not self.routed_memory or not self.memory_router:
             return ""
 
         try:
-            # Route the query to up to 2 most confident domains
+            # Route the query to up to FLOWER_PRIMARY_ROUTES (7) domains
             routes = self.memory_router.route_text(query_text)
             if not routes:
                 return ""
 
-            domain_budget = max_chars // min(len(routes[:2]), 2)
-            parts = []
+            # φ-split: top domain gets personal budget, second gets knowledge budget
+            budget = trinity_budget(max_chars)
+            domain_budgets = [budget["personal"], budget["knowledge"], budget["collective"]]
 
-            for route in routes[:2]:
+            parts = []
+            for idx, route in enumerate(routes[:min(len(routes), FLOWER_PRIMARY_ROUTES)]):
+                char_budget = domain_budgets[min(idx, len(domain_budgets) - 1)]
                 domain = f"{route['type']}.{route['domain']}"
-                entries = self.routed_memory.retrieve_from_domain(domain, limit=4)
+                # Minimum TRINITY (3) entries, maximum HARMONY (6)
+                entries = self.routed_memory.retrieve_from_domain(
+                    domain, limit=max(TRINITY, min(HARMONY, int(char_budget / 80)))
+                )
                 if not entries:
                     continue
 
@@ -2067,13 +2278,22 @@ class MemorySystem:
                     if not ui and not ar:
                         continue
                     snippet = f"  [{ui[:80]}] → {ar[:120]}" if ar else f"  [{ui[:80]}]"
-                    if char_count + len(snippet) + 1 > domain_budget:
+                    if char_count + len(snippet) + 1 > char_budget:
                         break
                     lines.append(snippet)
                     char_count += len(snippet) + 1
 
                 if lines:
                     parts.append(f"[Memory: {label}]\n" + "\n".join(lines))
+
+            # Visual intent: inject image refs if query has visual keywords
+            visual_keywords = {"image", "picture", "photo", "avatar", "look", "visual", "show", "see"}
+            if any(kw in query_text.lower() for kw in visual_keywords):
+                img_refs = self.get_image_context(query_text, limit=TRINITY)
+                if img_refs:
+                    img_lines = [f"  [{r['caption']}] → {r['path']}" for r in img_refs if r.get("path")]
+                    if img_lines:
+                        parts.append("[Image References]\n" + "\n".join(img_lines))
 
             return "\n".join(parts) if parts else ""
         except Exception as e:
