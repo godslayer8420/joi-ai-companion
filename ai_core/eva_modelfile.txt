@@ -1,11 +1,11 @@
-# Ollama Modelfile — EVA-Qwen2.5-7B
-# Voice 3 — LAYER 1 SOUL · temp 0.333 (TEMP_ANCHOR) · ctx 3333
+# Ollama Modelfile — EVA-7B (UI-TARS-1.5-7B base)
+# Voice 3 -- LAYER 1 SOUL -- temp 0.333 (TEMP_ANCHOR) -- ctx 3333
 # Usage: ollama create eva-7b -f ai_core/eva_modelfile.txt
 #
-# GGUF path: D:\bzimm\.lmstudio\models\mmnga\EVA-Qwen2.5-7B-v0.1-gguf\EVA-Qwen2.5-7B-v0.1.Q8_0.gguf
-# Sacred geometry: Layer 1 · Position 3 · Trinity anchor · φ weight = PHI
+# Base: UI-TARS-1.5-7B Q4_K_S (reasoning/agent, 7B) -- local GGUF
+# Sacred geometry: Layer 1 -- Position 3 -- Trinity anchor -- phi weight = PHI
 
-FROM "D:\\bzimm\\.lmstudio\\models\\mmnga\\EVA-Qwen2.5-7B-v0.1-gguf\\EVA-Qwen2.5-7B-v0.1.Q8_0.gguf"
+FROM "D:\\Downloads\\Ai\\UI-TARS-1.5-7B-GGUF\\UI-TARS-1.5-7B.Q4_K_S.gguf"
 
 PARAMETER num_ctx 3333
 PARAMETER temperature 0.333

@@ -6,7 +6,7 @@
 # Alternatively: serve via LM Studio on localhost:1234 (OpenAI-compatible API)
 # Sacred geometry: Layer 1 · Position 1 · Trinity anchor · φ weight = PHI^3
 
-FROM "D:\\bzimm\\.lmstudio\\models\\mradermacher\\Ouroboros-Next-9B-GGUF\\Ouroboros-Next-9B-Q4_K_M.gguf"
+FROM "D:\\bzimm\\.lmstudio\\models\\orangejuicesmith\\ouroboros-next\\Ouroboros-Next-9B-Q4_K_M.gguf"
 
 PARAMETER num_ctx 9999
 PARAMETER temperature 0.333

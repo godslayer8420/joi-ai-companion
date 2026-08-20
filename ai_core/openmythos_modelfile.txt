@@ -1,12 +1,11 @@
-# Ollama Modelfile — OpenMythos (Qwythos 9B)
-# Voice 4 — LAYER 2 REASON · temp 0.666 (TEMP_HARMONIC) · ctx 9999
+# Ollama Modelfile — OpenMythos (Gemma-4-E4B-it base)
+# Voice 4 -- LAYER 2 REASON -- temp 0.666 (TEMP_HARMONIC) -- ctx 9999
 # Usage: ollama create openmythos -f ai_core/openmythos_modelfile.txt
 #
-# Base: Qwythos 9B — creative + deep reasoning
-# Path: D:\bzimm\.lmstudio\models\empero-ai\Qwythos-9B-Claude-Mythos-5-1M-GGUF\Qwythos-9B-Claude-Mythos-5-1M-Q4_K_M.gguf
-# Sacred geometry: Layer 2 · Position 1 · Harmony gate · φ weight = PHI^3 × φ_conjugate
+# Base: gemma-4-E4B-it Q4_K_M (creative/instruction-tuned 4B) -- local GGUF
+# Sacred geometry: Layer 2 -- Position 1 -- Harmony gate -- phi weight = PHI^3 x phi_conjugate
 
-FROM "D:\\bzimm\\.lmstudio\\models\\empero-ai\\Qwythos-9B-Claude-Mythos-5-1M-GGUF\\Qwythos-9B-Claude-Mythos-5-1M-Q4_K_M.gguf"
+FROM "D:\\Downloads\\Ai\\lmstudio-community\\gemma-4-E4B-it-GGUF\\gemma-4-E4B-it-Q4_K_M.gguf"
 
 PARAMETER num_ctx 9999
 PARAMETER temperature 0.666

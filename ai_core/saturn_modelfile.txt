@@ -6,7 +6,7 @@
 # Alternatively: serve via LM Studio on localhost:1234 (OpenAI-compatible API)
 # Sacred geometry: Layer 1 · Position 2 · Trinity anchor · φ weight = PHI^2
 
-FROM "D:\\bzimm\\.lmstudio\\models\\mradermacher\\Saturn-7B.Q4_K_S.gguf"
+FROM "D:\\bzimm\\.lmstudio\\models\\mradermacher\\Saturn-7B-GGUF\\Saturn-7B.Q4_K_S.gguf"
 
 PARAMETER num_ctx 6666
 PARAMETER temperature 0.333

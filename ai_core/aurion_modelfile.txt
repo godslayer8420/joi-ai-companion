@@ -12,7 +12,7 @@
 # "aurion" is the model name users see. No long filenames. Just: aurion.
 # The AurionUnifiedModel wires all 9 voices behind this identity.
 
-FROM "D:\\bzimm\\.lmstudio\\models\\mradermacher\\Ouroboros-Next-9B-GGUF\\Ouroboros-Next-9B-Q4_K_M.gguf"
+FROM "D:\\bzimm\\.lmstudio\\models\\orangejuicesmith\\ouroboros-next\\Ouroboros-Next-9B-Q4_K_M.gguf"
 
 PARAMETER num_ctx 9999
 PARAMETER temperature 0.333
