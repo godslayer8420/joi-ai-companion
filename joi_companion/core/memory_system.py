@@ -1956,6 +1956,138 @@ class MemorySystem:
                 ids.append(doc_id)
         return ids
 
+    # ── Memory Upgrader: φ-decay aging, recency scoring, advisory routing ──────
+
+    def age_rag_documents(self, steps: int = 1) -> int:
+        """Apply φ-decay to relevance scores on all legacy RAG documents.
+
+        Each call multiplies relevance by φ⁻¹ (≈0.618) per step.
+        Documents that already have a vortex_tag are skipped (already upgraded).
+        Returns number of documents updated.
+
+        Call periodically (e.g., on startup or after a session ends) to naturally
+        fade old knowledge so fresh entries surface first.
+        """
+        updated = 0
+        with self._db_lock:
+            docs = self.rag_documents.all()
+            for doc in docs:
+                old_rel = float(doc.get("relevance", 1.0))
+                new_rel = round(phi_decay(old_rel, steps=steps), 6)
+                # Backfill vortex_tag for legacy entries that lack it
+                content = str(doc.get("content", ""))
+                vortex = (len(content) % 9) or 9
+                self.rag_documents.update(
+                    {"relevance": new_rel, "vortex_tag": vortex},
+                    doc_ids=[doc.doc_id] if hasattr(doc, "doc_id") else [],
+                )
+                updated += 1
+        return updated
+
+    def age_skill_knowledge(self, namespace: str = None, steps: int = 1) -> int:
+        """Apply φ-decay to relevance scores in the skill_namespaces table.
+
+        Optionally filter to a single namespace. Returns count updated.
+        """
+        updated = 0
+        with self._db_lock:
+            docs = self.skill_namespaces.all()
+            for doc in docs:
+                if namespace and doc.get("namespace") != namespace:
+                    continue
+                old_rel = float(doc.get("relevance", 1.0))
+                new_rel = round(phi_decay(old_rel, steps=steps), 6)
+                if hasattr(doc, "doc_id"):
+                    self.skill_namespaces.update({"relevance": new_rel}, doc_ids=[doc.doc_id])
+                    updated += 1
+        return updated
+
+    def get_advisory_context(self, query: str, max_chars: int = 800) -> str:
+        """Retrieve a compact advisory routing block for internal deliberation.
+
+        Combines:
+          1. Up to TRINITY (3) high-priority autonomy directives matching the query
+          2. Up to TRINITY (3) important facts boosted by priority weight
+          3. Up to TRINITY (3) skill namespace entries most relevant to the query
+
+        The result is injected into the LLM's system context as an internal
+        deliberation hook — Aurion reasons over this before composing her reply.
+        Returns an empty string if no relevant advisory content is found.
+        """
+        lines = []
+        budget = max(200, max_chars)
+        query_tokens = self._tokenize_for_rag(query)
+
+        # 1. Autonomy directives (highest priority — Aurion's core vow)
+        try:
+            profile = self.get_profile() or {}
+            directives = list(profile.get("autonomy_directives", []) or [])
+            scored_dirs = []
+            for item in directives:
+                if not isinstance(item, dict):
+                    continue
+                directive = str(item.get("directive", "")).strip()
+                if not directive:
+                    continue
+                priority = str(item.get("priority", "normal")).lower()
+                boost = 0.14 if priority == "critical" else 0.09 if priority == "high" else 0.04
+                score = self._score_overlap(query_tokens, self._tokenize_for_rag(directive)) + boost
+                if score > 0.04:
+                    scored_dirs.append((score, priority, directive))
+            scored_dirs.sort(reverse=True)
+            for _, priority, directive in scored_dirs[:TRINITY]:
+                lines.append(f"[directive/{priority}] {directive[:200]}")
+        except Exception:
+            pass
+
+        # 2. Important facts (semantic memory anchors)
+        try:
+            facts = list(profile.get("important_facts", []) or [])
+            scored_facts = []
+            for item in facts:
+                if not isinstance(item, dict):
+                    continue
+                fact = str(item.get("fact", "")).strip()
+                if not fact:
+                    continue
+                priority = str(item.get("priority", "normal")).lower()
+                boost = 0.14 if priority == "critical" else 0.09 if priority == "high" else 0.04
+                score = self._score_overlap(query_tokens, self._tokenize_for_rag(fact)) + boost
+                if score > 0.04:
+                    scored_facts.append((score, priority, fact))
+            scored_facts.sort(reverse=True)
+            for _, priority, fact in scored_facts[:TRINITY]:
+                lines.append(f"[fact/{priority}] {fact[:200]}")
+        except Exception:
+            pass
+
+        # 3. Skill namespace entries (procedural knowledge)
+        try:
+            skill_entries = self.get_skill_context(query, limit=TRINITY)
+            for entry in skill_entries:
+                ns = entry.get("namespace", "general")
+                content = str(entry.get("content", "")).strip()
+                if content:
+                    lines.append(f"[skill/{ns}] {content[:200]}")
+        except Exception:
+            pass
+
+        if not lines:
+            return ""
+
+        # Trim to budget
+        result_lines = []
+        char_count = 0
+        for line in lines:
+            if char_count + len(line) + 1 > budget:
+                break
+            result_lines.append(line)
+            char_count += len(line) + 1
+
+        if not result_lines:
+            return ""
+        return "[Advisory Context]\n" + "\n".join(result_lines)
+
     # ── Skill Knowledge Namespaces ─────────────────────────────────────────────
 
     def add_skill_knowledge(
@@ -2123,11 +2255,49 @@ class MemorySystem:
             candidates.sort(key=lambda x: x["score"], reverse=True)
             return candidates[:limit]
 
+    def _recency_weight(self, timestamp_str: str, now_iso: str = None) -> float:
+        """Return a φ-decay recency weight in [0.382, 1.0] based on document age.
+
+        - Within 1 day  → 1.0 (fully fresh)
+        - Within 7 days → φ⁻¹ ≈ 0.618
+        - Beyond 30 days → φ⁻² ≈ 0.382 (floor)
+
+        Uses sacred 3-6-9 day buckets: 3d / 6d / 9d / older.
+        """
+        if not timestamp_str:
+            return PHI_CONJUGATE  # unknown age → neutral weight
+        try:
+            ts_str = str(timestamp_str).replace("Z", "").split(".")[0]
+            ts = datetime.fromisoformat(ts_str)
+            now = datetime.fromisoformat(now_iso.replace("Z", "").split(".")[0]) if now_iso else datetime.utcnow()
+            age_days = max(0.0, (now - ts).total_seconds() / 86400.0)
+            if age_days < 1.0:
+                return 1.0                # same day — fully resonant
+            elif age_days < TRINITY:      # < 3 days
+                return PHI_CONJUGATE      # 0.618
+            elif age_days < HARMONY:      # < 6 days
+                return PHI_CONJUGATE ** 2  # 0.382
+            elif age_days < UNITY:        # < 9 days
+                return PHI_CONJUGATE ** 3  # 0.236
+            else:
+                return PHI_CONJUGATE ** 4  # 0.146 floor for old docs
+        except Exception:
+            return PHI_CONJUGATE
+
     def retrieve_relevant_memories(self, query, limit=8):
+        """Retrieve RAG memories ranked by (cosine overlap × φ-relevance × recency).
+
+        Scoring formula (sacred geometry blend):
+          final_score = semantic_overlap × stored_relevance × recency_weight
+          + priority_boost  (for directives/facts)
+
+        Recency buckets: today=1.0, <3d=0.618, <6d=0.382, <9d=0.236, older=0.146
+        """
         with self._db_lock:
             query_tokens = self._tokenize_for_rag(query)
             if not query_tokens:
                 return []
+            now_iso = datetime.utcnow().isoformat()
             candidates = []
             docs = self.rag_documents.all()
             if self.max_rag_scan_docs > 0 and len(docs) > self.max_rag_scan_docs:
@@ -2136,17 +2306,24 @@ class MemorySystem:
                 content = self._sanitize_memory_content(doc.get("content", ""))
                 if not content:
                     continue
-                score = self._score_overlap(query_tokens, self._tokenize_for_rag(content))
-                if score > 0.01:
-                    candidates.append({
-                        "source": str(doc.get("source", "memory")),
-                        "content": content,
-                        "score": score,
-                        "timestamp": str(doc.get("timestamp", ""))
-                    })
+                semantic = self._score_overlap(query_tokens, self._tokenize_for_rag(content))
+                if semantic <= 0.01:
+                    continue
+                stored_rel = float(doc.get("relevance", 1.0))
+                ts = str(doc.get("timestamp", ""))
+                recency = self._recency_weight(ts, now_iso)
+                final_score = semantic * stored_rel * recency
+                candidates.append({
+                    "source": str(doc.get("source", "memory")),
+                    "content": content,
+                    "score": final_score,
+                    "timestamp": ts,
+                })
 
             profile = self.get_profile() or {}
             life_context = profile.get("life_context", {}) or {}
+            profile_ts = str(profile.get("updated_at", ""))
+            recency_profile = self._recency_weight(profile_ts, now_iso)
             for key, value in life_context.items():
                 content = f"Life context {key}: {value}"
                 score = self._score_overlap(query_tokens, self._tokenize_for_rag(content))
@@ -2154,8 +2331,8 @@ class MemorySystem:
                     candidates.append({
                         "source": "profile_life_context",
                         "content": content,
-                        "score": score,
-                        "timestamp": str(profile.get("updated_at", ""))
+                        "score": score * recency_profile,
+                        "timestamp": profile_ts,
                     })
             for field in ("preferences", "accomplishments", "personal_details"):
                 for value in list(profile.get(field, []) or []):
@@ -2165,8 +2342,8 @@ class MemorySystem:
                         candidates.append({
                             "source": f"profile_{field}",
                             "content": content,
-                            "score": score,
-                            "timestamp": str(profile.get("updated_at", ""))
+                            "score": score * recency_profile,
+                            "timestamp": profile_ts,
                         })
             for item in list(profile.get("autonomy_directives", []) or []):
                 if not isinstance(item, dict):
@@ -2178,11 +2355,13 @@ class MemorySystem:
                 content = f"Autonomy directive ({priority}): {directive}"
                 score = self._score_overlap(query_tokens, self._tokenize_for_rag(content))
                 if score > 0.01:
+                    boost = 0.08 if priority == "critical" else 0.04 if priority == "high" else 0.0
+                    item_ts = str(item.get("last_seen_at") or profile_ts)
                     candidates.append({
                         "source": "profile_autonomy_directives",
                         "content": content,
-                        "score": score + (0.08 if priority == "critical" else 0.04 if priority == "high" else 0.0),
-                        "timestamp": str(item.get("last_seen_at") or profile.get("updated_at", ""))
+                        "score": score * self._recency_weight(item_ts, now_iso) + boost,
+                        "timestamp": item_ts,
                     })
 
             for item in list(profile.get("important_facts", []) or []):
@@ -2196,14 +2375,16 @@ class MemorySystem:
                 score = self._score_overlap(query_tokens, self._tokenize_for_rag(content))
                 if score > 0.01:
                     priority = str(item.get("priority", "normal")).strip().lower() or "normal"
+                    boost = 0.14 if priority == "critical" else 0.09 if priority == "high" else 0.04
+                    item_ts = str(item.get("last_seen_at") or profile_ts)
                     candidates.append({
                         "source": "profile_important_facts",
                         "content": content,
-                        "score": score + (0.14 if priority == "critical" else 0.09 if priority == "high" else 0.04),
-                        "timestamp": str(item.get("last_seen_at") or profile.get("updated_at", ""))
+                        "score": score * self._recency_weight(item_ts, now_iso) + boost,
+                        "timestamp": item_ts,
                     })
 
-            candidates.sort(key=lambda row: (row["score"], row["timestamp"]), reverse=True)
+            candidates.sort(key=lambda row: row["score"], reverse=True)
             return candidates[:max(1, int(limit))]
 
     def build_rag_context(self, query, max_chars=2200, limit=8):
@@ -2316,6 +2497,14 @@ class MemorySystem:
                 block = block[:remaining].rsplit(" ", 1)[0].rstrip(" ,;:.") + "..."
             blocks.append(block)
             total += len(block) + 2
+
+        # Advisory context first — Aurion's internal deliberation anchor
+        if query:
+            try:
+                advisory = self.get_advisory_context(query, max_chars=600)
+                _append_block(advisory)
+            except Exception:
+                pass
 
         rag_context = self.build_rag_context(query, max_chars=min(max_chars, max(1200, int(max_chars * 0.45))), limit=rag_limit)
         _append_block(rag_context)
