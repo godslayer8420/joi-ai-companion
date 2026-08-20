@@ -18,4 +18,23 @@ dist/
 .pytest_cache/
 android/**/.gradle/
 android/**/build/
-.aurion_downloads/
+.aurion_downloads/# --- Local runtime/dev artifacts ---
+.venv/
+.vs/
+affordances.txt
+atmosphere.txt
+aurion_revival_checkpoint.json
+consequences.txt
+continuity.txt
+frontend_debug.html
+pending_patch.diff
+ui_slice.txt
+web_ui.py.txt
+joi_companion/aurion_runtime/
+joi_companion/core/audio_transcriber.py
+joi_companion/core/content_generator.py
+joi_companion/data/memory/aurion_notes.jsonl
+static/aurion_bg.png
+static/favicon.ico
+static/media/
+static/vendor/
