@@ -5,7 +5,7 @@
 # Base: UI-TARS-1.5-7B Q4_K_S (reasoning/agent, 7B) -- local GGUF
 # Sacred geometry: Layer 1 -- Position 3 -- Trinity anchor -- phi weight = PHI
 
-FROM "D:\\Downloads\\Ai\\UI-TARS-1.5-7B-GGUF\\UI-TARS-1.5-7B.Q4_K_S.gguf"
+FROM "D:\\Downloads\\Others\\Aurion files\\aurion\\EVA-Qwen2.5-7B-v0.1.Q8_0.gguf"
 
 PARAMETER num_ctx 3333
 PARAMETER temperature 0.333
