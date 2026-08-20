@@ -1,4 +1,4 @@
-"""Playwright browser tools with per-ToolContext lifecycle/thread affinity."""
+﻿"""Playwright browser tools with per-ToolContext lifecycle/thread affinity."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def _normalize_browser_engine(engine: str = "") -> str:
 
 
 # Subagent browse restrictions (no loopback/private/non-HTTP) apply to ALL
-# delegated subagents — read-only, acting, and fail-closed missing-constraint.
+# delegated subagents â€” read-only, acting, and fail-closed missing-constraint.
 # Same fail-closed predicate as secret/control READ denials (SSOT in tools.core).
 from ouroboros.tools.core import is_restricted_subagent_profile as _readonly_subagent
 
@@ -53,7 +53,7 @@ def _is_subagent_blocked_browser_url(url: str, ctx: Any = None) -> bool:
     scheme = parsed.scheme
     if scheme == "file":
         # Readonly/acting subagents may open their OWN built files for visual
-        # checks, scoped to the task's explicit workspace root only — never the
+        # checks, scoped to the task's explicit workspace root only â€” never the
         # data root, so secrets like data/settings.json stay unreachable.
         return not _file_url_under_workspace(parsed, ctx)
     if scheme not in {"http", "https"}:
@@ -83,7 +83,7 @@ def _control_plane_loopback_ports() -> set[int]:
     the configured LOCAL_MODEL_PORT; the ACTUAL bound server port (find_free_port may fall
     back, recorded in state/server_port); and any isolated-run server's EXPLICIT
     OUROBOROS_SERVER_PORT / OUROBOROS_HOST_SERVICE_PORT. The +1/+2 above are the fixed
-    default ports, NOT adjacency guesses — configured/bound ports are blocked EXACTLY (the
+    default ports, NOT adjacency guesses â€” configured/bound ports are blocked EXACTLY (the
     isolated server sets both env ports independently, so no neighbor needs guessing)."""
     ports = {AGENT_SERVER_PORT, AGENT_SERVER_PORT + 1, AGENT_SERVER_PORT + 2}
     for env in ("OUROBOROS_SERVER_PORT", "OUROBOROS_HOST_SERVICE_PORT", "LOCAL_MODEL_PORT"):
@@ -147,7 +147,7 @@ _METADATA_IPV6_ADDRESSES = frozenset({ipaddress.ip_address("fd00:ec2::254")})
 
 def _is_metadata_ip(ip: ipaddress._BaseAddress) -> bool:
     # Unwrap IPv4-mapped IPv6 (http://[::ffff:169.254.169.254]/) so the
-    # link-local check sees the real IPv4 — mirrors mcp_client's guard.
+    # link-local check sees the real IPv4 â€” mirrors mcp_client's guard.
     mapped = getattr(ip, "ipv4_mapped", None)
     if mapped is not None:
         ip = mapped
@@ -287,7 +287,7 @@ def _set_playwright_browsers_path_if_bundled() -> None:
                 _playwright_ready = False
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
             _playwright_browsers_path_managed = True
-            log.debug("Bundled Playwright browsers detected (%s) — set PLAYWRIGHT_BROWSERS_PATH=0", ", ".join(bundled))
+            log.debug("Bundled Playwright browsers detected (%s) â€” set PLAYWRIGHT_BROWSERS_PATH=0", ", ".join(bundled))
     except Exception:
         pass  # non-fatal; fall through to standard cache lookup
 
@@ -412,31 +412,10 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
     _playwright_ready = True
 
 
-def _maybe_alias_playwright_binary(exc: Exception) -> bool:
-    """Bridge x64->arm64 browser cache lookups on Apple Silicon when possible."""
-    match = _MISSING_EXECUTABLE_RE.search(str(exc))
-    if not match:
-        return False
 
-    missing_path = pathlib.Path(match.group(1).strip())
-    missing_dir = missing_path.parent
-    if "-mac-x64" not in str(missing_dir):
-        return False
 
-    alternate_dir = pathlib.Path(str(missing_dir).replace("-mac-x64", "-mac-arm64"))
-    alternate_binary = alternate_dir / missing_path.name
-    if not alternate_binary.exists():
-        return False
 
-    try:
-        if missing_dir.exists():
-            return missing_path.exists()
-        missing_dir.symlink_to(alternate_dir, target_is_directory=True)
-        log.info("Aliased Playwright browser cache %s -> %s", missing_dir, alternate_dir)
-        return True
-    except OSError:
-        log.debug("Failed to alias Playwright browser cache", exc_info=True)
-        return False
+
 
 
 def _launch_browser_with_fallback(pw_instance: Any, *, engine: str = "chromium", allow_cache_write: bool = True) -> Any:
@@ -552,7 +531,7 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
     bs_context.route("**/api/owner/context-mode", _block_context_mode_owner_post)
     bs_context.route("**/api/owner/scope-review-floor", _block_scope_review_floor_owner_post)
     # Broad glob (any /api/owner/** path): the glob matches the RAW URL, so a
-    # percent-encoded `safety%2Dmode` would slip a literal pattern — the handler
+    # percent-encoded `safety%2Dmode` would slip a literal pattern â€” the handler
     # URL-DECODES and aborts only the safety-mode POST (review round 6).
     bs_context.route("**/api/owner/**", _block_safety_mode_owner_post)
     # Broad glob (any /api/owner/skills/** path) so a percent-encoded `attest%2Dreview`
@@ -573,7 +552,7 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
     else:
         # Main-agent SSRF guard (conservative): block ONLY link-local /
         # cloud-metadata endpoints (169.254.0.0/16 incl. decimal/hex spellings,
-        # fd00:ec2::254). Private/LAN stays reachable — owners legitimately
+        # fd00:ec2::254). Private/LAN stays reachable â€” owners legitimately
         # browse their own LAN services. Route interception re-validates every
         # hop, so redirects cannot smuggle a metadata fetch.
         bs_context.route(
@@ -657,7 +636,7 @@ def _blocks_context_mode_self_lowering_js(value: str) -> bool:
 
 def _blocks_scope_review_floor_self_lowering_js(value: str) -> bool:
     """Block browser JS that tries to write the owner-only scope-review floor
-    (CW1, v6.34.0) — the click+fetch bypass of the dedicated owner endpoint. The key is
+    (CW1, v6.34.0) â€” the click+fetch bypass of the dedicated owner endpoint. The key is
     deprecated and enforcement-inert since v6.80.0 (scope-review applicability follows the
     owner context mode), but it stays an owner-only stored setting."""
     low = str(value or "").lower()
@@ -671,7 +650,7 @@ def _blocks_scope_review_floor_self_lowering_js(value: str) -> bool:
 
 def _blocks_safety_mode_self_lowering_js(value: str) -> bool:
     """Block browser JS that tries to change the owner-only LLM-safety coverage mode
-    (v6.54.3) — the click+fetch bypass of the dedicated owner endpoint. URL-decode
+    (v6.54.3) â€” the click+fetch bypass of the dedicated owner endpoint. URL-decode
     first so a percent-encoded path (``safety%2Dmode``) cannot slip the literal
     match (review round 6; mirrors the owner-attestation guard)."""
     import urllib.parse
@@ -709,7 +688,7 @@ def _blocks_post_task_evolution_js(value: str) -> bool:
 
 def _blocks_owner_skill_attest_js(value: str) -> bool:
     """Block browser JS that tries to loopback-POST the OWNER-ONLY skill-attestation
-    endpoint (C1, v6.39) — owner-attestation skips the LLM skill review and must be
+    endpoint (C1, v6.39) â€” owner-attestation skips the LLM skill review and must be
     owner-issued, never agent self-callable from a browser fetch. URL-decode first so a
     percent-encoded path (``%61ttest-review``) cannot slip past the literal match."""
     import urllib.parse
@@ -723,7 +702,7 @@ def _route_fallback(route: Any) -> None:
     """Pass a non-matching request DOWN the guard chain (review round 8).
 
     Playwright runs route handlers in REVERSE registration order and
-    ``route.continue_()`` FINALIZES the request — a later-registered catch-all
+    ``route.continue_()`` FINALIZES the request â€” a later-registered catch-all
     that continued would silently skip every earlier-registered owner-endpoint
     block (they were dead, not merely ordered oddly). ``route.fallback()``
     defers to the next matching handler and plain-continues when none remain,
@@ -770,7 +749,7 @@ def _block_scope_review_floor_owner_post(route: Any) -> None:
 
 
 def _is_safety_mode_owner_post(request: Any) -> bool:
-    """POST to the owner safety-mode endpoint — decoded, so a percent-encoded
+    """POST to the owner safety-mode endpoint â€” decoded, so a percent-encoded
     path cannot slip past (the broad ``**/api/owner/**`` route registration
     feeds RAW URLs here; Starlette decodes server-side, so we must too)."""
     import urllib.parse
@@ -792,7 +771,7 @@ def _block_safety_mode_owner_post(route: Any) -> None:
 
 
 def _is_owner_skill_attest_post(request: Any) -> bool:
-    """A browser POST to the owner-only skill owner-attestation endpoint — the click/form
+    """A browser POST to the owner-only skill owner-attestation endpoint â€” the click/form
     bypass of the evaluate-only JS guard (C1, v6.39)."""
     try:
         import urllib.parse
@@ -814,7 +793,7 @@ def _block_owner_skill_attest_post(route: Any) -> None:
 
 
 def _is_owner_settings_self_elevation_post(request: Any) -> bool:
-    """A browser POST /api/settings carrying an owner-only self-modification toggle —
+    """A browser POST /api/settings carrying an owner-only self-modification toggle â€”
     the click+Save bypass of the evaluate-only JS guards."""
     try:
         if str(request.method or "").upper() != "POST":
@@ -830,7 +809,7 @@ def _is_owner_settings_self_elevation_post(request: Any) -> bool:
         or "ouroboros_allow_mutative_subagents" in body
         or "ouroboros_evolution_persistent_objective" in body
         # v6.88: the delegated-executor POLICY. D1 makes the executor axis the OWNER's,
-        # and this key is the whole of it — which route answers, on whose subscription.
+        # and this key is the whole of it â€” which route answers, on whose subscription.
         # It rides the generic settings path deliberately (the Settings UI sets a route
         # string often, and a dedicated endpoint would be ceremony for nothing), so it
         # joins the keys already guarded here rather than getting a mechanism of its own.
@@ -876,7 +855,7 @@ def _inject_native_screenshot(ctx: ToolContext, b64: str) -> str:
     The screenshot is saved to ``data/uploads/screenshots/<ts>.png`` (the
     re-view path used by eviction placeholders) and injected as a user-role
     image block via the existing multipart-preserving merge. The TOOL result
-    stays a plain string — the tool-message contract is unchanged. Non-vision
+    stays a plain string â€” the tool-message contract is unchanged. Non-vision
     models keep the analyze_screenshot/vlm_query flow.
     """
     try:
@@ -955,7 +934,7 @@ def _page_health_snapshot(page: Any) -> str:
 
 
 def _wait_for_page_paint(page: Any, timeout_ms: int = 3000) -> None:
-    """J (v6.39): let the page paint before a screenshot — wait for document.readyState then
+    """J (v6.39): let the page paint before a screenshot â€” wait for document.readyState then
     two requestAnimationFrames (the second fires AFTER the paint), so a freshly-rendered
     canvas/WebGL frame is not captured black/blank. Best-effort + bounded; never blocks."""
     try:
@@ -966,7 +945,7 @@ def _wait_for_page_paint(page: Any, timeout_ms: int = 3000) -> None:
         # Schedule a paint flag via double-rAF (the second fires AFTER the paint), then wait
         # for it with a HARD Playwright timeout. The flag-set evaluate returns immediately
         # (it does not await a page-owned promise), and wait_for_function's own timeout
-        # bounds the wait — so a page that suppresses requestAnimationFrame can never hang
+        # bounds the wait â€” so a page that suppresses requestAnimationFrame can never hang
         # the capture (the page's own timers are never trusted to unblock us).
         page.evaluate(
             "() => { window.__obo_painted = false;"
@@ -1015,7 +994,7 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
                  viewport: str = "", engine: str = "chromium", device: str = "") -> str:
     readonly_subagent = _readonly_subagent(ctx)
     if readonly_subagent and _is_subagent_blocked_browser_url(str(url or ""), ctx):
-        return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents may browse external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace — not the Ouroboros API ports, private/link-local IPs, or other schemes."
+        return "âš ï¸ BROWSER_LOCAL_READONLY_BLOCKED: subagents may browse external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace â€” not the Ouroboros API ports, private/link-local IPs, or other schemes."
     try:
         page = _ensure_browser(ctx, engine=engine, device=device)
         if viewport:
@@ -1024,7 +1003,7 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
         if wait_for:
             page.wait_for_selector(wait_for, timeout=timeout)
         if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or ""), ctx):
-            return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents may browse external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace — not the Ouroboros API ports, private/link-local IPs, or other schemes."
+            return "âš ï¸ BROWSER_LOCAL_READONLY_BLOCKED: subagents may browse external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace â€” not the Ouroboros API ports, private/link-local IPs, or other schemes."
         return _extract_page_output(page, output, ctx)
     except Exception as e:
         if _is_infrastructure_error(ctx):
@@ -1037,7 +1016,7 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
             if wait_for:
                 page.wait_for_selector(wait_for, timeout=timeout)
             if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or ""), ctx):
-                return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents may browse external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace — not the Ouroboros API ports, private/link-local IPs, or other schemes."
+                return "âš ï¸ BROWSER_LOCAL_READONLY_BLOCKED: subagents may browse external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace â€” not the Ouroboros API ports, private/link-local IPs, or other schemes."
             return _extract_page_output(page, output, ctx)
         raise
 
@@ -1058,7 +1037,7 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
     normalized_action = str(action or "").strip().lower()
     readonly_subagent = _readonly_subagent(ctx)
     if readonly_subagent and normalized_action == "evaluate":
-        return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot run arbitrary browser JavaScript."
+        return "âš ï¸ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot run arbitrary browser JavaScript."
 
     def _do_action():
         page = _ensure_browser(
@@ -1067,7 +1046,7 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
             device=device or getattr(ctx.browser_state, "_browser_device", "") or "",
         )
         if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or ""), ctx):
-            return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents may act on external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace — not the Ouroboros API ports or private/link-local pages."
+            return "âš ï¸ BROWSER_LOCAL_READONLY_BLOCKED: subagents may act on external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace â€” not the Ouroboros API ports or private/link-local pages."
 
         if normalized_action == "click":
             if not selector:
@@ -1104,42 +1083,42 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                 return "Error: value (JS code) required for evaluate"
             if _blocks_context_mode_self_lowering_js(value):
                 return (
-                    "⚠️ CONTEXT_MODE_SELF_LOWERING_BLOCKED: browser JavaScript "
+                    "âš ï¸ CONTEXT_MODE_SELF_LOWERING_BLOCKED: browser JavaScript "
                     "looks like an attempt to lower OUROBOROS_CONTEXT_MODE. "
-                    "Context mode is owner-controlled — ask the owner to use "
+                    "Context mode is owner-controlled â€” ask the owner to use "
                     "the Low/Max toggle."
                 )
             if _blocks_scope_review_floor_self_lowering_js(value):
                 return (
-                    "⚠️ SCOPE_REVIEW_FLOOR_SELF_LOWERING_BLOCKED: browser JavaScript "
+                    "âš ï¸ SCOPE_REVIEW_FLOOR_SELF_LOWERING_BLOCKED: browser JavaScript "
                     "looks like an attempt to write OUROBOROS_SCOPE_REVIEW_FLOOR. The "
-                    "floor is a deprecated, enforcement-inert owner setting — it is "
+                    "floor is a deprecated, enforcement-inert owner setting â€” it is "
                     "owner-controlled, and the agent must not write it."
                 )
             if _blocks_safety_mode_self_lowering_js(value):
                 return (
-                    "⚠️ SAFETY_MODE_SELF_LOWERING_BLOCKED: browser JavaScript "
+                    "âš ï¸ SAFETY_MODE_SELF_LOWERING_BLOCKED: browser JavaScript "
                     "looks like an attempt to change OUROBOROS_SAFETY_MODE. "
-                    "LLM-safety coverage is owner-controlled (BIBLE P3) — the agent "
+                    "LLM-safety coverage is owner-controlled (BIBLE P3) â€” the agent "
                     "must not reduce its own supervision."
                 )
             if _blocks_mutative_toggle_js(value):
                 return (
-                    "⚠️ ELEVATION_BLOCKED: browser JavaScript looks like an attempt to enable "
-                    "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS. This master toggle is owner-controlled — "
+                    "âš ï¸ ELEVATION_BLOCKED: browser JavaScript looks like an attempt to enable "
+                    "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS. This master toggle is owner-controlled â€” "
                     "the agent must not self-enable mutative subagents."
                 )
             if _blocks_post_task_evolution_js(value):
                 return (
-                    "⚠️ ELEVATION_BLOCKED: browser JavaScript looks like an attempt to enable "
-                    "OUROBOROS_POST_TASK_EVOLUTION. Post-task self-evolution is owner-controlled — "
+                    "âš ï¸ ELEVATION_BLOCKED: browser JavaScript looks like an attempt to enable "
+                    "OUROBOROS_POST_TASK_EVOLUTION. Post-task self-evolution is owner-controlled â€” "
                     "the agent must not self-enable it."
                 )
             if _blocks_owner_skill_attest_js(value):
                 return (
-                    "⚠️ OWNER_SKILL_ATTESTATION_SELF_CALL_BLOCKED: browser JavaScript looks like an "
+                    "âš ï¸ OWNER_SKILL_ATTESTATION_SELF_CALL_BLOCKED: browser JavaScript looks like an "
                     "attempt to POST /api/owner/skills/<skill>/attest-review. Owner-attestation skips "
-                    "the LLM skill review and is owner-only — the agent must not self-attest its own skill."
+                    "the LLM skill review and is owner-only â€” the agent must not self-attest its own skill."
                 )
             try:
                 result = page.evaluate(value)
@@ -1159,7 +1138,7 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                         raise
                     snippet = value.strip()[:80]
                     return (
-                        "⚠️ BROWSER_EVALUATE_SYNTAX_ERROR: the JS failed to parse "
+                        "âš ï¸ BROWSER_EVALUATE_SYNTAX_ERROR: the JS failed to parse "
                         f"({msg.splitlines()[0][:160]}). First 80 chars: {snippet!r}. "
                         "Check for stray git conflict markers (<<<<<<<) or shell "
                         "heredocs (<<EOF) leaked into the value."
@@ -1289,3 +1268,58 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=180,
         ),
     ]
+
+def _maybe_alias_playwright_binary(err: Exception) -> bool:
+    import os
+    import re
+    import shutil
+    from pathlib import Path
+
+    msg = str(err)
+    m = re.search(r"Executable doesn't exist at (.+)", msg)
+    if not m:
+        return False
+
+    raw = m.group(1).strip().strip("'""")
+    p = Path(raw)
+
+    # If message points to the binary, use its parent dir; if it points to dir, use dir directly.
+    alias_dir = p.parent if p.name in ("chrome-headless-shell", "chrome") else p
+    alias_name = alias_dir.name
+    arm_name = alias_name.replace("-x64", "-arm64")
+    if arm_name == alias_name:
+        return False
+
+    source_dir = alias_dir.parent / arm_name
+    if not source_dir.exists():
+        return False
+
+    # Already a symlink to anything: done.
+    if alias_dir.is_symlink():
+        return True
+
+    # If a real directory/file already exists at alias path, remove it so we can create symlink.
+    if alias_dir.exists():
+        if alias_dir.is_dir():
+            shutil.rmtree(alias_dir)
+        else:
+            alias_dir.unlink()
+
+    alias_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(source_dir, alias_dir, target_is_directory=True)
+        return True
+    except OSError as e:
+        if os.name == "nt" and getattr(e, "winerror", None) == 1314:
+            # Fallback to NTFS junction when symlink privilege is unavailable.
+            import subprocess
+            if alias_dir.exists():
+                return True
+            cmd = ["cmd", "/c", "mklink", "/J", str(alias_dir), str(source_dir)]
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode == 0 and alias_dir.exists():
+                return True
+        raise
+
+
+

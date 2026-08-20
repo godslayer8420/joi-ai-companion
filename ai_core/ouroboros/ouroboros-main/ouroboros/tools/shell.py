@@ -69,6 +69,19 @@ def _tracked_subprocess_run(cmd, **kwargs):
         kwargs.setdefault("errors", "replace")
     kwargs.setdefault("stdin", subprocess.DEVNULL)
     kwargs.update(subprocess_new_group_kwargs())
+    
+    # Windows shell built-in commands (echo, dir, type, etc.) are not executables.
+    # On Windows, if cmd is a list and the first element is a shell built-in,
+    # enable shell=True so subprocess can find and execute it.
+    if os.name == 'nt' and isinstance(cmd, list) and cmd:
+        _WINDOWS_SHELL_BUILTINS = {
+            'echo', 'dir', 'cd', 'del', 'copy', 'move', 'type', 'ren',
+            'cls', 'exit', 'pause', 'set', 'for', 'if', 'goto', 'call'
+        }
+        cmd_name = pathlib.Path(cmd[0]).name.lower()
+        if cmd_name in _WINDOWS_SHELL_BUILTINS:
+            kwargs.setdefault("shell", True)
+    
     proc = subprocess.Popen(cmd, **kwargs)
     with _subprocess_lock:
         _active_subprocesses.add(proc)

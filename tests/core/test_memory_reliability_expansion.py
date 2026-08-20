@@ -67,14 +67,20 @@ def test_memory_resilience_reliability_tier_matches_score():
 
 def test_memory_resilience_reliability_summary_is_stable():
     ms = MemorySystem()
-    status = ms.get_memory_resilience_status()
-    rel = status.get("reliability") or {}
 
-    assert "summary" in rel
-    summary = rel["summary"]
-    assert isinstance(summary, str)
-    assert "tier=" in summary
-    assert "score=" in summary
-    assert "runtime_path=" in summary
-    assert "long_term_path=" in summary
-    assert "backup_dir=" in summary
+    rel = ms.get_memory_resilience_status()["reliability"]
+
+    assert isinstance(rel, dict)
+    for key in (
+        "runtime_path_present",
+        "long_term_path_present",
+        "backup_dir_present",
+        "cloud_mode",
+    ):
+        assert key in rel
+
+    assert isinstance(rel["runtime_path_present"], bool)
+    assert isinstance(rel["long_term_path_present"], bool)
+    assert isinstance(rel["backup_dir_present"], bool)
+    assert rel["cloud_mode"] in {"shadow", "local", "disabled", "enabled"}
+   

@@ -150,15 +150,15 @@ def repo_provenance(repo_dir: pathlib.Path) -> dict[str, Any]:
         return result
 
     result["git_available"] = True
-    result["head"] = head.stdout.strip()
+    result["head"] = (head.stdout or "").strip()
     branch = _run(["git", "branch", "--show-current"], repo)
-    result["branch"] = branch.stdout.strip() if branch.returncode == 0 else ""
+    result["branch"] = (branch.stdout or "").strip() if branch.returncode == 0 else ""
     describe = _run(["git", "describe", "--tags", "--dirty", "--always"], repo)
-    result["describe"] = describe.stdout.strip() if describe.returncode == 0 else ""
+    result["describe"] = (describe.stdout or "").strip() if describe.returncode == 0 else ""
     status = _run(["git", "status", "--porcelain=v1", "--untracked-files=all"], repo)
-    status_text = status.stdout if status.returncode == 0 else ""
+    status_text = status.stdout or "" if status.returncode == 0 else ""
     tracked_diff = _run(["git", "diff", "--binary", "HEAD", "--"], repo, timeout=30)
-    tracked_diff_text = tracked_diff.stdout if tracked_diff.returncode == 0 else ""
+    tracked_diff_text = tracked_diff.stdout or "" if tracked_diff.returncode == 0 else ""
     result.update(
         {
             # WHETHER the probe answered is a separate fact from what it said. A failed probe
