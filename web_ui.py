@@ -179,6 +179,12 @@ from joi_companion.aurion_runtime.lumen_city import (
 )
 
 app = Flask(__name__)
+try:
+    from joi_companion.webapp import register_blueprints as _register_blueprints
+    _register_blueprints(app)
+except Exception as _bp_err:  # noqa: BLE001
+    import logging as _logging
+    _logging.getLogger(__name__).warning("Blueprint registration skipped: %s", _bp_err)
 world_consequence_service = WorldConsequenceService()
 festival_exploration_service = FestivalExplorationService()
 regional_continuity_service = RegionalContinuityService()
