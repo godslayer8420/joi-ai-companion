@@ -111,6 +111,59 @@ def _post(url: str, payload: dict, headers: dict, timeout: int) -> Optional[str]
         return json.loads(r.read())
 
 
+def _enrich_with_soul(messages: list, ouroboros_base: str) -> list:
+    """Inject Ouroboros soul context into the system prompt for Voice 1.
+
+    Tries the live sidecar's /api/state endpoint first (reads identity/memory),
+    then falls back to the local SQLite soul bridge. Returns messages unchanged
+    on any error so inference always continues.
+    """
+    soul_block: Optional[str] = None
+
+    # 1. Try live Ouroboros sidecar state
+    try:
+        raw = _post(
+            f"{ouroboros_base}/api/state",
+            {},
+            {"Content-Type": "application/json"},
+            TRINITY,  # 3 s fast timeout — don't stall inference
+        )
+        if isinstance(raw, dict):
+            identity = raw.get("identity") or {}
+            memory   = raw.get("recent_memory") or []
+            parts = []
+            if identity.get("name"):
+                parts.append(f"[SOUL] Identity: {identity['name']}")
+            if identity.get("core_values"):
+                parts.append(f"[SOUL] Values: {identity['core_values']}")
+            if memory:
+                mem_str = " | ".join(str(m) for m in memory[-TRINITY:])
+                parts.append(f"[SOUL] Recent: {mem_str}")
+            if parts:
+                soul_block = "\n".join(parts)
+    except Exception:
+        pass
+
+    # 2. Fallback: local SQLite soul bridge
+    if not soul_block:
+        try:
+            from ai_core.ouroboros_soul_bridge import get_soul
+            soul_block = get_soul().to_system_block()
+        except Exception:
+            pass
+
+    if not soul_block:
+        return messages
+
+    # Inject as first system message (or prepend to existing system message)
+    msgs = list(messages)
+    if msgs and msgs[0].get("role") == "system":
+        msgs[0] = {"role": "system", "content": f"{soul_block}\n\n{msgs[0]['content']}"}
+    else:
+        msgs.insert(0, {"role": "system", "content": soul_block})
+    return msgs
+
+
 def _call_voice(
     voice: VoiceLayer,
     messages: list,
@@ -124,25 +177,13 @@ def _call_voice(
     temp_r = round(temp, TRINITY)
     try:
         if voice.provider == "ouroboros":
-            # Route Voice 1 through the full Ouroboros sidecar.
-            # Falls back to Ollama direct if sidecar not running.
-            base = ouroboros_base or "http://127.0.0.1:8765"
-            try:
-                raw = _post(
-                    f"{base}/gateway/complete",
-                    {"model": voice.model_key, "messages": messages,
-                     "temperature": temp_r, "max_tokens": tokens, "stream": False},
-                    {"Content-Type": "application/json"},
-                    _TIMEOUT,
-                )
-                if raw and "content" in raw:
-                    return str(raw["content"]).strip() or None
-            except Exception:
-                pass
-            # Sidecar not up -- fall through to Ollama directly
+            # Voice 1 (SOUL layer): enrich messages with live Ouroboros soul
+            # context, then run inference via Ollama using the ouroboros-next model.
+            # Ouroboros sidecar acts as memory/identity layer, not a completion API.
+            enriched = _enrich_with_soul(messages, ouroboros_base or "http://127.0.0.1:8765")
             raw = _post(
                 f"{ollama_base}/api/chat",
-                {"model": voice.model_key, "messages": messages, "stream": False,
+                {"model": voice.model_key, "messages": enriched, "stream": False,
                  "options": {"temperature": temp_r, "num_predict": tokens}},
                 {"Content-Type": "application/json"},
                 _TIMEOUT,

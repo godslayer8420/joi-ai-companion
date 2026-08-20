@@ -40,6 +40,6 @@ echo [Ouroboros] Primary model: ouroboros-next
 echo.
 
 cd /d "%OUROBOROS_DIR%"
-python -m ouroboros.server_entrypoint --port 8765 --host 127.0.0.1
+python server.py --port 8765 --host 127.0.0.1
 
 endlocal
