@@ -620,16 +620,13 @@ class PersonalityEngine:
             "gemma4-31b": "gemma-4-31b-it",
             "gemma-4-31b": "gemma-4-31b-it",
             "gemma-4-31b-it": "gemma-4-31b-it",
-            # ── Voice models (Ollama + LM Studio) ──────────────────────────────
-            # Ollama voice models registered from GGUF Modelfiles
-            "gemma3-voice": "gemma3-voice",
-            "gemma3-12b": "gemma3-voice",
-            "gemma-3-12b-voice": "gemma3-voice",
-            "aurora-voice": "gemma3-voice",                                      # Aurion primary voice
+            # ── Voice models (Ollama) ───────────────────────────────────────────
+            # Ollama voice models (nuro-voice is the primary working model)
+            "aurion-voice": "nuro-voice",                                       # Aurion primary voice (Nuro 7B)
+            "aurora-voice": "nuro-voice",                                       # Aurion alias
             "nuro-voice": "nuro-voice",                                         # Nuro Copilot 7B voice
             "nuro-copilot-voice": "nuro-voice",
-            "gemma4-voice": "gemma4-voice",                                     # Gemma 4 multimodal voice
-            "gemma-4-voice": "gemma4-voice",
+            "voice": "nuro-voice",
             # ── Gemini free models (Google AI Studio — project: Aurion) ───────
             "gemini-flash": "gemini-3-flash-preview",
             "gemini3-flash": "gemini-3-flash-preview",
