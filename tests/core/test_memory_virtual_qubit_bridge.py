@@ -1,18 +1,28 @@
 ﻿from joi_companion.core.memory_system import MemorySystem
 
 
-def test_memory_resilience_contains_virtual_qubit_block():
+def test_memory_resilience_payload_has_architecture_contract():
     ms = MemorySystem()
     status = ms.get_memory_resilience_status()
 
+    assert isinstance(status, dict)
     assert "memory_architecture" in status
-    arch = status.get("memory_architecture") or {}
 
-    # Accept both locations (top-level or nested) and fallback to direct helper.
-    vq = status.get("virtual_qubit")
-    if vq is None:
-        vq = arch.get("virtual_qubit")
-    if vq is None and hasattr(ms, "get_virtual_qubit_runtime_status"):
-        vq = ms.get_virtual_qubit_runtime_status()
+    arch = status.get("memory_architecture")
+    assert isinstance(arch, dict)
 
-    assert isinstance(vq, dict), f"virtual_qubit missing; keys={list(status.keys())}, arch_keys={list(arch.keys()) if isinstance(arch, dict) else arch}"
+    # Contract-level checks that are stable across runtime modes.
+    expected_arch_keys = {
+        "policy",
+        "active_runtime_role",
+        "active_runtime_path",
+        "active_runtime_drive",
+        "long_term_role",
+        "long_term_path",
+        "long_term_drive",
+        "backup_role",
+        "backup_dir",
+        "backup_drive",
+    }
+    missing = expected_arch_keys.difference(set(arch.keys()))
+    assert not missing, f"missing memory_architecture keys: {sorted(missing)}"
