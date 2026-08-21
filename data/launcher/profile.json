@@ -1,0 +1,10 @@
+{
+  "name": "Player",
+  "total_playtime_hours": 0.0,
+  "layers_played": [
+    "rhythm_venue",
+    "battle_arena",
+    "kart_circuit"
+  ],
+  "total_score": 0
+}

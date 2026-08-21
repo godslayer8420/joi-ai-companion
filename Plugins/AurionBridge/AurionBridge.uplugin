@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Aurion Bridge",
+	"Description": "Connects Unreal Engine 5 to the Aurion AI companion Python backend via HTTP/WebSocket. Handles world state, alien encounters, arena events, kart state, and avatar emotion sync.",
+	"Category": "AI Companion",
+	"CreatedBy": "Godslayer8420",
+	"CreatedByURL": "https://github.com/godslayer8420/joi-ai-companion",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "AurionBridge",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}

@@ -251,8 +251,9 @@ class AlienSystem:
     # ── Containment ────────────────────────────────────────────────────────────
 
     def _get_or_create_pod(self, session_id: str, upgrade: int = 0) -> ContainmentPod:
-        if session_id in self._pods:
-            return self._pods[session_id]
+        cache_key = (session_id, upgrade)
+        if cache_key in self._pods:
+            return self._pods[cache_key]
         if self._db:
             try:
                 from tinydb import Query
@@ -260,7 +261,10 @@ class AlienSystem:
                 if doc:
                     p = ContainmentPod(**{k: v for k, v in doc.items()
                                           if k in ContainmentPod.__dataclass_fields__})
-                    self._pods[session_id] = p
+                    # Update capacity if upgrade level changed
+                    if upgrade > 0:
+                        p.capacity = TRINITY + upgrade * TRINITY
+                    self._pods[cache_key] = p
                     return p
             except Exception:
                 pass
@@ -271,7 +275,7 @@ class AlienSystem:
             owner_session=session_id,
             capacity=capacity,
         )
-        self._pods[session_id] = p
+        self._pods[cache_key] = p
         self._save_pod(p)
         return p
 
