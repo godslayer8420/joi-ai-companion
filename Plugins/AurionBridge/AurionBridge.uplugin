@@ -2,6 +2,7 @@
 	"FileVersion": 3,
 	"Version": 1,
 	"VersionName": "1.0",
+	"EngineVersion": "5.8.1",
 	"FriendlyName": "Aurion Bridge",
 	"Description": "Connects Unreal Engine 5 to the Aurion AI companion Python backend via HTTP/WebSocket. Handles world state, alien encounters, arena events, kart state, and avatar emotion sync.",
 	"Category": "AI Companion",
@@ -19,7 +20,9 @@
 			"Name": "AurionBridge",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
-		},
+		}
+	],
+	"Plugins": [
 		{
 			"Name": "EnhancedInput",
 			"Enabled": true

@@ -192,9 +192,11 @@ class TestWorldSimulation:
                 # Spawns generated should match
                 assert tick1.spawns_generated == tick2.spawns_generated
                 
-            # Force cleanup of database connections
-            mem1._db.close()
-            mem2._db.close()
+            # Force cleanup of database connections (guard for fallback stub)
+            if getattr(mem1, '_db', None) is not None:
+                mem1._db.close()
+            if getattr(mem2, '_db', None) is not None:
+                mem2._db.close()
             del mem1
             del mem2
             gc.collect()

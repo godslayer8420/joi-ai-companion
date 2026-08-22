@@ -5,9 +5,7 @@ public class AurionBridge : ModuleRules
 	public AurionBridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
-
-		PublicIncludePaths.AddRange(new string[] { });
-		PrivateIncludePaths.AddRange(new string[] { });
+		CppStandard = CppStandardVersion.Cpp20;
 
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
@@ -25,13 +23,16 @@ public class AurionBridge : ModuleRules
 			"Niagara",
 			"MotionWarping",
 			"Water",
-			"PCG"
+			"PCG",
+			"MetasoundEngine",
+			"AudioMixer"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"Slate",
-			"SlateCore"
+			"SlateCore",
+			"DeveloperSettings"
 		});
 	}
 }
