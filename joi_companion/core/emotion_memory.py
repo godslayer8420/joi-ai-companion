@@ -151,7 +151,7 @@ class EmotionMemory:
             try:
                 from tinydb import Query
                 self._db.upsert({
-                    "session_id": sid,
+                    "session_id": session_id,
                     "turns": s.turns,
                     "cumulative_valence": s.cumulative_valence,
                     "cumulative_trust": s.cumulative_trust,

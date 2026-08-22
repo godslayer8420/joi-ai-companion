@@ -3056,24 +3056,26 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
 
     def generate_response(self, user_emotion, user_text=None, memory_system=None, user_name=None, speech_style="casual", rag_context=None, behavior_settings=None):
         user_name = self.sanitize_user_name(user_name)
+        # Stable per-user session key for emotion/relationship engines
+        _sid = user_name if user_name else "default"
 
         # ── Emotion + Relationship context injection ───────────────────────────
         if user_text:
             try:
                 if self._emotion_memory:
-                    self._emotion_memory.record(user_text)
+                    self._emotion_memory.record(_sid, user_text)
             except Exception:
                 pass
         _emotion_ctx = ""
         _rel_ctx = ""
         try:
             if self._emotion_memory:
-                _emotion_ctx = self._emotion_memory.system_prompt_injection()
+                _emotion_ctx = self._emotion_memory.system_prompt_injection(_sid)
         except Exception:
             pass
         try:
             if self._relationship_engine:
-                _rel_ctx = self._relationship_engine.system_prompt_injection()
+                _rel_ctx = self._relationship_engine.system_prompt_injection(_sid)
         except Exception:
             pass
         if _emotion_ctx or _rel_ctx:
@@ -3085,12 +3087,12 @@ Respond now as Aurion, in first person, directly to what {user_name_display} jus
             self._turn_rel_ctx = ""
         recent_responses = memory_system.get_recent_aurion_responses(count=8) if memory_system else []
 
-        # ── local helper: award XP + emotion score before returning ────────────
+        # ── local helper: award XP + emotion score after response is built ─────
         def _finalize(text: str) -> str:
             try:
                 if self._relationship_engine and user_text:
-                    em_score = self._emotion_memory.emotion_score() if self._emotion_memory else 0.5
-                    self._relationship_engine.earn_xp(base=10, emotion_score=em_score)
+                    em_score = self._emotion_memory.emotion_score(_sid) if self._emotion_memory else 0.5
+                    self._relationship_engine.earn_xp(_sid, base_xp=10, emotion_score=em_score)
             except Exception:
                 pass
             return text
