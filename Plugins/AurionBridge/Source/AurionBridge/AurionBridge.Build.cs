@@ -17,7 +17,15 @@ public class AurionBridge : ModuleRules
 			"HTTP",
 			"Json",
 			"JsonUtilities",
-			"WebSockets"
+			"WebSockets",
+			"EnhancedInput",
+			"GameplayAbilities",
+			"GameplayTags",
+			"GameplayTasks",
+			"Niagara",
+			"MotionWarping",
+			"Water",
+			"PCG"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]

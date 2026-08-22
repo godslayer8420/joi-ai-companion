@@ -39,6 +39,11 @@ class UnrealMessageType(Enum):
     GENERATED_VIDEO = "generated_video"     # Video animation
     CODE_EXECUTION = "code_execution"       # Execute Unreal command
     ANIMATION_TRIGGER = "animation_trigger" # Start animation sequence
+    REGION_CHANGE = "region_change"         # Region-level state transitions
+    ALIEN_ENCOUNTER = "alien_encounter"     # Spawn/encounter updates
+    WORLD_EVENT = "world_event"             # Generic world tick/event payload
+    ARENA_STATE = "arena_state"             # Battle arena updates
+    KART_STATE = "kart_state"               # Kart/race updates
     
     # Unreal → Aurion
     PLAYER_INPUT = "player_input"           # Player action/dialogue
@@ -345,6 +350,112 @@ class UnrealIntegration:
         )
         await self.bridge.send_avatar_state(state)
     
+    def _build_lip_sync_data(self, text: str, speed: float = 1.0) -> Dict[str, Any]:
+        """Derive lightweight viseme/phoneme timing from text for realtime facial sync."""
+        normalized_text = " ".join(str(text or "").strip().split())
+        speed = max(0.5, min(2.0, float(speed or 1.0)))
+        words = [w for w in normalized_text.split(" ") if w]
+        if not words:
+            return {
+                "source": "heuristic_text",
+                "duration_sec": 0.0,
+                "phonemes": [],
+                "visemes": [],
+                "sample_rate_hz": 60,
+            }
+
+        duration_per_char = 0.045 / speed
+        min_word_duration = 0.08 / speed
+
+        viseme_map = {
+            "A": "aa",
+            "E": "eh",
+            "I": "ih",
+            "O": "oh",
+            "U": "uh",
+            "M": "closed",
+            "B": "closed",
+            "P": "closed",
+            "F": "ff",
+            "V": "ff",
+            "L": "ln",
+            "R": "rr",
+            "S": "ss",
+            "Z": "ss",
+            "T": "tt",
+            "D": "tt",
+            "N": "nn",
+            "K": "kk",
+            "G": "kk",
+            "W": "ww",
+            "Y": "yy",
+            "C": "kk",
+            "J": "jj",
+            "H": "rest",
+            "Q": "kk",
+            "X": "ss",
+        }
+
+        phonemes: List[Dict[str, Any]] = []
+        visemes: List[Dict[str, Any]] = []
+        t_cursor = 0.0
+
+        for word in words:
+            alpha_chars = [ch.upper() for ch in word if ch.isalpha()]
+            if not alpha_chars:
+                t_cursor += 0.03 / speed
+                continue
+
+            raw_duration = max(min_word_duration, len(alpha_chars) * duration_per_char)
+            char_duration = raw_duration / len(alpha_chars)
+            word_start = t_cursor
+
+            for index, ch in enumerate(alpha_chars):
+                start = round(t_cursor, 4)
+                end = round(t_cursor + char_duration, 4)
+                viseme = viseme_map.get(ch, "rest")
+                phoneme_payload = {
+                    "symbol": ch,
+                    "start": start,
+                    "end": end,
+                    "duration": round(char_duration, 4),
+                    "word_index": len(phonemes),
+                    "position_in_word": index,
+                }
+                phonemes.append(phoneme_payload)
+                visemes.append(
+                    {
+                        "viseme": viseme,
+                        "phoneme": ch,
+                        "start": start,
+                        "end": end,
+                        "weight": 1.0,
+                    }
+                )
+                t_cursor += char_duration
+
+            # tiny intra-word release + inter-word gap for blend transitions
+            t_cursor += 0.02 / speed
+            if visemes:
+                visemes.append(
+                    {
+                        "viseme": "rest",
+                        "phoneme": "_",
+                        "start": round(max(word_start, t_cursor - (0.02 / speed)), 4),
+                        "end": round(t_cursor, 4),
+                        "weight": 0.25,
+                    }
+                )
+            t_cursor += 0.035 / speed
+
+        return {
+            "source": "heuristic_text",
+            "duration_sec": round(t_cursor, 4),
+            "sample_rate_hz": 60,
+            "phonemes": phonemes,
+            "visemes": visemes,
+        }
+
     async def sync_speech(self, text: str, audio_path: Optional[str] = None,
                          voice_id: str = "aurion_default", emotion: str = "neutral"):
         """Sync speech to Unreal"""
@@ -355,7 +466,8 @@ class UnrealIntegration:
             text=text,
             audio_path=audio_path,
             voice_id=voice_id,
-            emotion=emotion
+            emotion=emotion,
+            lip_sync_data=self._build_lip_sync_data(text=text, speed=1.0),
         )
         await self.bridge.send_speech(speech)
     

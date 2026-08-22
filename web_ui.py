@@ -179,6 +179,16 @@ from joi_companion.aurion_runtime.lumen_city import (
 )
 
 app = Flask(__name__)
+
+# --- WebRTC signaling (optional, graceful if flask-socketio not installed) ---
+try:
+    from webrtc_signaling import register_signaling as _register_signaling
+    _signaling_sio = _register_signaling(app)
+except Exception as _sig_err:
+    import logging as _logging
+    _logging.getLogger(__name__).warning("WebRTC signaling not registered: %s", _sig_err)
+    _signaling_sio = None
+
 try:
     from joi_companion.webapp import register_blueprints as _register_blueprints
     _register_blueprints(app)
@@ -633,25 +643,25 @@ def _infer_aurion_unreal_identity_profile(palette: dict | None = None):
         },
         "body_morph": {
             "height_scale": 1.0,
-            "body_scale": 0.98,
-            "shoulder_scale": 0.96,
-            "waist_scale": 0.84,
-            "hip_scale": 1.08,
-            "bust_scale": 1.2,
-            "thigh_scale": 1.02,
-            "arm_scale": 0.96,
+            "body_scale": 0.95,
+            "shoulder_scale": 0.93,
+            "waist_scale": 0.82,
+            "hip_scale": 1.06,
+            "bust_scale": 1.18,
+            "thigh_scale": 1.0,
+            "arm_scale": 0.98,
             "neck_scale": 0.99,
-            "glute_scale": 1.08,
-            "leg_length_scale": 1.03,
-            "torso_length_scale": 1.01,
-            "calf_scale": 1.0,
-            "forearm_scale": 0.97,
+            "glute_scale": 1.05,
+            "leg_length_scale": 1.02,
+            "torso_length_scale": 1.0,
+            "calf_scale": 0.99,
+            "forearm_scale": 0.98,
             "hand_scale": 0.98,
-            "face_width_scale": 0.95,
-            "face_height_scale": 1.01,
-            "jaw_scale": 0.93,
-            "eye_scale": 1.01,
-            "lip_scale": 0.99,
+            "face_width_scale": 0.92,
+            "face_height_scale": 1.0,
+            "jaw_scale": 0.89,
+            "eye_scale": 1.03,
+            "lip_scale": 0.96,
         },
         "body_physics": {
             "profile": "unreal-cinematic-softbody",
@@ -61062,8 +61072,6 @@ if __name__ == '__main__':
         host=_BIND_HOST,
         ssl_context=ssl_context,
     )
-
-
 
 
 
